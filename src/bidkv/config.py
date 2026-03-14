@@ -40,9 +40,7 @@ class BidKVConfig:
         if self.delta_budget < 0.0:
             raise ValueError(f"delta_budget must be >= 0.0, got {self.delta_budget}")
         if self.max_bids_per_solve < 0:
-            raise ValueError(
-                f"max_bids_per_solve must be >= 0, got {self.max_bids_per_solve}"
-            )
+            raise ValueError(f"max_bids_per_solve must be >= 0, got {self.max_bids_per_solve}")
 
     @property
     def is_active(self) -> bool:
