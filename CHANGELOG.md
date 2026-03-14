@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Algorithm Corrections S01+S04+S07** (#042): 三项算法层语义修正
+  - Fix S01 (#018): PressureDetector 保证使用瞬时值，无滚动窗口平滑——已验证并添加显式文档保证
+  - Fix S04 (#021): 新增 `ExecutionResult` 数据类（`actual_freed` vs `estimated_freed`）及 `GreedyBidSolver.execute_accepted()` 方法，记录每轮压缩的实际效果
+  - Fix S07 (#024): 新增 `PressureDetector.get_kv_stats()` 作为 KV 状态唯一数据源，`GreedyBidSolver.solve_with_detector()` 直接从 detector 获取 needed_tokens
+  - 新增 22 个专项测试覆盖所有三项修正
+
 ### Added
 
 - **Core Layer Extraction** (#041): BidPoolManager, GreedyBidSolver, PressureDetector, CompressionExecutor

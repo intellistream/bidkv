@@ -19,7 +19,7 @@ from bidkv.protocol.bid import (
     BidPool,
     CompressionBid,
 )
-from bidkv.solver import GreedyBidSolver, SolverConfig
+from bidkv.solver import ExecutionResult, GreedyBidSolver, SolverConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -739,3 +739,344 @@ class TestTopLevelImports:
         from bidkv import CompressionExecutor
 
         assert CompressionExecutor is not None
+
+
+# ===========================================================================
+# Fix S01 #018: PressureDetector 瞬时值（无 rolling window）
+# ===========================================================================
+
+
+class TestPressureDetectorInstantaneous:
+    """Fix 1 (S01 #018): 压力检测必须基于瞬时值，不做平滑。"""
+
+    def test_instant_response_to_spike(self) -> None:
+        """瞬时占用率飙升必须立即触发压力。"""
+        config = PressureConfig(threshold_pct=0.85, enabled=True)
+        detector = PressureDetector(config)
+
+        # 初始低占用
+        detector.update_stats(used_tokens=100, max_tokens=1000)
+        assert not detector.is_under_pressure()
+
+        # 瞬间飙升到 90% — 必须立即检测到
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+        assert detector.is_under_pressure()
+
+    def test_instant_response_to_drop(self) -> None:
+        """瞬时占用率回落必须立即解除压力。"""
+        config = PressureConfig(threshold_pct=0.85, enabled=True)
+        detector = PressureDetector(config)
+
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+        assert detector.is_under_pressure()
+
+        # 瞬间降到 50% — 必须立即解除
+        detector.update_stats(used_tokens=500, max_tokens=1000)
+        assert not detector.is_under_pressure()
+
+    def test_no_smoothing_effect(self) -> None:
+        """连续更新不应产生平滑效果。"""
+        config = PressureConfig(threshold_pct=0.85, enabled=True)
+        detector = PressureDetector(config)
+
+        # 多次低占用
+        for _ in range(10):
+            detector.update_stats(used_tokens=100, max_tokens=1000)
+        assert not detector.is_under_pressure()
+
+        # 单次飙升 — 不受之前历史影响
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+        assert detector.is_under_pressure()
+
+
+# ===========================================================================
+# Fix S04 #021: ExecutionResult + execute_accepted
+# ===========================================================================
+
+
+class TestExecutionResult:
+    """ExecutionResult 数据结构。"""
+
+    def test_basic_fields(self) -> None:
+        result = ExecutionResult(
+            bid_id="req-1:bid:0",
+            estimated_freed=200,
+            actual_freed=180,
+            success=True,
+        )
+        assert result.bid_id == "req-1:bid:0"
+        assert result.estimated_freed == 200
+        assert result.actual_freed == 180
+        assert result.success is True
+
+    def test_shortfall(self) -> None:
+        result = ExecutionResult(
+            bid_id="req-1:bid:0", estimated_freed=200, actual_freed=150, success=True
+        )
+        assert result.shortfall == 50
+
+    def test_no_shortfall(self) -> None:
+        result = ExecutionResult(
+            bid_id="req-1:bid:0", estimated_freed=200, actual_freed=220, success=True
+        )
+        assert result.shortfall == 0
+
+    def test_failed_execution(self) -> None:
+        result = ExecutionResult(
+            bid_id="req-1:bid:0", estimated_freed=200, actual_freed=0, success=False
+        )
+        assert result.shortfall == 200
+        assert result.success is False
+
+    def test_frozen(self) -> None:
+        result = ExecutionResult(
+            bid_id="req-1:bid:0", estimated_freed=200, actual_freed=180, success=True
+        )
+        with pytest.raises(AttributeError):
+            result.actual_freed = 999  # type: ignore[misc]
+
+
+class TestExecuteAccepted:
+    """GreedyBidSolver.execute_accepted() — 记录 actual vs estimated。"""
+
+    def test_execute_returns_actual(self) -> None:
+        """executor 返回实际释放量。"""
+
+        class FakeExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                return target_tokens - 20  # 总是少释放 20
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        bid = _make_bid("req-1", 0, 200, 0.05)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+        acceptance = solver.solve(pool, 100)
+
+        results = solver.execute_accepted(acceptance, pool, FakeExecutor())
+        assert len(results) == 1
+        assert results[0].estimated_freed == 200
+        assert results[0].actual_freed == 180
+        assert results[0].success is True
+        assert results[0].shortfall == 20
+
+    def test_execute_full_match(self) -> None:
+        """actual == estimated 时 shortfall 为 0。"""
+
+        class PerfectExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                return target_tokens
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        bid = _make_bid("req-1", 0, 200, 0.05)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+        acceptance = solver.solve(pool, 100)
+
+        results = solver.execute_accepted(acceptance, pool, PerfectExecutor())
+        assert len(results) == 1
+        assert results[0].shortfall == 0
+        assert results[0].success is True
+
+    def test_execute_failure(self) -> None:
+        """executor 抛异常 → success=False, actual_freed=0。"""
+
+        class FailingExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                raise RuntimeError("compress failed")
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        bid = _make_bid("req-1", 0, 200, 0.05)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+        acceptance = solver.solve(pool, 100)
+
+        results = solver.execute_accepted(acceptance, pool, FailingExecutor())
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].actual_freed == 0
+        assert results[0].estimated_freed == 200
+
+    def test_execute_multi_bid(self) -> None:
+        """多个 bid 的执行结果。"""
+
+        class PartialExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                return target_tokens // 2
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True, delta_budget=1.0))
+        bids = (
+            _make_bid("req-1", 0, 200, 0.05),
+            _make_bid("req-2", 0, 100, 0.02),
+        )
+        pool = BidPool(snapshot_time_ns=1, bids=bids)
+        acceptance = solver.solve(pool, 300)
+        assert acceptance.accepted_count == 2
+
+        results = solver.execute_accepted(acceptance, pool, PartialExecutor())
+        assert len(results) == 2
+        total_actual = sum(r.actual_freed for r in results)
+        total_estimated = sum(r.estimated_freed for r in results)
+        assert total_actual == total_estimated // 2
+
+    def test_execute_empty_acceptance(self) -> None:
+        """空 acceptance → 空结果列表。"""
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        pool = BidPool(snapshot_time_ns=1, bids=())
+        acceptance = solver.solve(pool, 100)  # empty pool → empty acceptance
+
+        class DummyExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                return 0
+
+        results = solver.execute_accepted(acceptance, pool, DummyExecutor())
+        assert results == []
+
+
+# ===========================================================================
+# Fix S07 #024: KV 统计唯一来源 + solve_with_detector
+# ===========================================================================
+
+
+class TestPressureDetectorGetKvStats:
+    """PressureDetector.get_kv_stats() — KV 统计唯一来源。"""
+
+    def test_kv_stats_structure(self) -> None:
+        config = PressureConfig(threshold_pct=0.85, enabled=True)
+        detector = PressureDetector(config)
+        detector.update_stats(used_tokens=800, max_tokens=1000, pending_high_priority=2)
+
+        stats = detector.get_kv_stats()
+        assert stats["used_tokens"] == 800
+        assert stats["max_tokens"] == 1000
+        assert stats["free_tokens"] == 200
+        assert stats["pending_high_priority"] == 2
+
+    def test_kv_stats_free_tokens_zero(self) -> None:
+        config = PressureConfig(enabled=True)
+        detector = PressureDetector(config)
+        detector.update_stats(used_tokens=1000, max_tokens=1000)
+
+        stats = detector.get_kv_stats()
+        assert stats["free_tokens"] == 0
+
+    def test_kv_stats_default(self) -> None:
+        detector = PressureDetector()
+        stats = detector.get_kv_stats()
+        assert stats["used_tokens"] == 0
+        assert stats["max_tokens"] == 0
+        assert stats["free_tokens"] == 0
+
+
+class TestSolveWithDetector:
+    """GreedyBidSolver.solve_with_detector() — Solver 从 PressureDetector 获取 needed_tokens。"""
+
+    def test_solve_uses_detector_needed_tokens(self) -> None:
+        """Solver 使用 detector.needed_tokens() 而非独立计算。"""
+        detector = PressureDetector(PressureConfig(threshold_pct=0.85, enabled=True))
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+
+        # needed = 900 - 850 = 50
+        assert detector.needed_tokens() == 50
+
+        bid = _make_bid("req-1", 0, 100, 0.02)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        result = solver.solve_with_detector(pool, detector)
+
+        # Solver 应选取 bid 以满足 50 tokens needed
+        assert result.accepted_count == 1
+        assert result.total_tokens_freed >= 50
+
+    def test_solve_with_detector_no_pressure(self) -> None:
+        """无压力时 needed_tokens=0 → Solver 不选取。"""
+        detector = PressureDetector(PressureConfig(threshold_pct=0.85, enabled=True))
+        detector.update_stats(used_tokens=500, max_tokens=1000)
+        assert detector.needed_tokens() == 0
+
+        bid = _make_bid("req-1", 0, 100, 0.02)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        result = solver.solve_with_detector(pool, detector)
+        assert result.is_empty
+        assert "no_tokens_needed" in result.decision_reason
+
+    def test_solve_with_detector_consistency(self) -> None:
+        """验证 Solver 和 Detector 使用同一 KV 状态口径。"""
+        detector = PressureDetector(PressureConfig(threshold_pct=0.80, enabled=True))
+        detector.update_stats(used_tokens=850, max_tokens=1000)
+
+        # detector: needed = 850 - 800 = 50
+        needed = detector.needed_tokens()
+        assert needed == 50
+
+        # Solver 通过 detector 获取 needed_tokens — 一致
+        bids = tuple(_make_bid(f"req-{i}", 0, 30, 0.01) for i in range(5))
+        pool = BidPool(snapshot_time_ns=1, bids=bids)
+
+        solver = GreedyBidSolver(SolverConfig(enabled=True, delta_budget=1.0))
+        result = solver.solve_with_detector(pool, detector)
+
+        assert result.total_tokens_freed >= needed
+
+    def test_solve_with_detector_feature_off(self) -> None:
+        """Solver feature OFF 时，即使 detector 有压力也不选取。"""
+        detector = PressureDetector(PressureConfig(threshold_pct=0.85, enabled=True))
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+
+        bid = _make_bid("req-1", 0, 100, 0.02)
+        pool = BidPool(snapshot_time_ns=1, bids=(bid,))
+
+        solver = GreedyBidSolver(SolverConfig(enabled=False))
+        result = solver.solve_with_detector(pool, detector)
+        assert result.is_empty
+
+
+# ===========================================================================
+# Integration: end-to-end with actual_freed tracking
+# ===========================================================================
+
+
+class TestEndToEndWithActualFreed:
+    """完整流程：Pressure → Snapshot → Solve → Execute → actual_freed 校验。"""
+
+    def test_full_flow(self) -> None:
+        # 1. Pressure detector 检测到压力
+        detector = PressureDetector(PressureConfig(threshold_pct=0.85, enabled=True))
+        detector.update_stats(used_tokens=900, max_tokens=1000)
+        assert detector.is_under_pressure()
+
+        # 2. Pool 提供 bids
+        pool_mgr = BidPoolManager(enabled=True)
+        pool_mgr.submit_bids("req-1", [_make_bid("req-1", 0, 100, 0.02)])
+        snapshot = pool_mgr.get_pool_snapshot()
+
+        # 3. Solver 从 detector 获取 needed_tokens 并求解
+        solver = GreedyBidSolver(SolverConfig(enabled=True))
+        acceptance = solver.solve_with_detector(snapshot, detector)
+        assert acceptance.accepted_count == 1
+
+        # 4. Execute — 实际释放少于预估
+        class PartialExecutor:
+            def execute(self, request_id: str, target_tokens: int) -> int:  # noqa: ARG002
+                return target_tokens - 30  # 只释放 70
+
+        results = solver.execute_accepted(acceptance, snapshot, PartialExecutor())
+        assert len(results) == 1
+        assert results[0].estimated_freed == 100
+        assert results[0].actual_freed == 70
+        assert results[0].shortfall == 30
+
+        # 5. 调用方可据此判断是否需要 fallback eviction
+        total_actual = sum(r.actual_freed for r in results)
+        needed = detector.needed_tokens()
+        if total_actual < needed:
+            # 需要 fallback eviction
+            pass  # 调用方处理
+
+
+class TestImportExecutionResult:
+    """验证从 bidkv 包级别导入 ExecutionResult。"""
+
+    def test_import(self) -> None:
+        from bidkv import ExecutionResult
+
+        assert ExecutionResult is not None

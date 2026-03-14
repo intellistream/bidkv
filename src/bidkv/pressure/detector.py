@@ -5,6 +5,17 @@
 由 FrameworkAdapter 定期推送 KV 统计（pressure interception boundary）。
 
 Feature Gate: ``compress.scheduling_primitive.v1``（默认 OFF）
+
+设计保证（Fix S01 #018）
+-----------------------
+- ``update_stats()`` 存储**瞬时值**，``is_under_pressure()`` 直接使用瞬时值。
+- **禁止** rolling window / 指数平滑 — 压力判断必须基于当前最新快照。
+
+KV 统计唯一来源（Fix S07 #024）
+------------------------------
+- ``PressureDetector`` 是 Solver 获取 KV 状态的**唯一入口**。
+- Solver 通过 ``detector.needed_tokens()`` 获取需要释放的 token 数，不独立计算。
+- 通过 ``detector.get_kv_stats()`` 获取当前 KV 统计快照。
 """
 
 from __future__ import annotations
@@ -134,3 +145,22 @@ class PressureDetector:
         # PressureConfig is a dataclass (not frozen), so we can mutate
         object.__setattr__(self._config, "enabled", enabled)
         logger.info("PressureDetector enabled -> %s", enabled)
+
+    def get_kv_stats(self) -> dict[str, int]:
+        """返回当前 KV 统计快照（唯一来源，Fix S07 #024）。
+
+        Solver 和其他组件必须通过此方法获取 KV 状态，不得独立计算。
+
+        Returns
+        -------
+        dict[str, int]
+            包含 ``used_tokens``, ``max_tokens``, ``free_tokens``,
+            ``pending_high_priority`` 字段。
+        """
+        free = max(0, self._max_tokens - self._used_tokens)
+        return {
+            "used_tokens": self._used_tokens,
+            "max_tokens": self._max_tokens,
+            "free_tokens": free,
+            "pending_high_priority": self._pending_high_priority,
+        }

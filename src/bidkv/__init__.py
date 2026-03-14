@@ -31,7 +31,7 @@ from bidkv.scoring import (
     ScoringStrategy,
     UniformScoring,
 )
-from bidkv.solver import GreedyBidSolver, SolverConfig
+from bidkv.solver import ExecutionResult, GreedyBidSolver, SolverConfig
 
 __all__ = [
     "__version__",
@@ -51,6 +51,7 @@ __all__ = [
     # Core
     "BidPoolManager",
     "CompressionExecutor",
+    "ExecutionResult",
     "GreedyBidSolver",
     "PressureConfig",
     "PressureDetector",
