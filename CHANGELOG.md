@@ -46,6 +46,17 @@ All notable changes to this project will be documented in this file.
   - Metrics 输出格式与 vLLM adapter 对齐（directional consistency 可验证）
   - 27 个集成测试全部通过
 
+- **vLLM 7-Baseline Experiment Framework** (#047): 8 策略 × 3 负载 × 3 并发 × 3 runs = 216 实验矩阵
+  - `bidkv.experiments.vllm.config`: `ExperimentConfig` / `VLLMServerConfig` / `SLOConfig`（冻结配置，含完整验证）
+  - `bidkv.experiments.vllm.workload`: `RequestTrace` / `WorkloadTrace` + dataset loaders（ShareGPT / CNN-DM / LongBench）
+  - `bidkv.experiments.vllm.collector`: `RequestResult` / `RunResult` / `CandidateSnapshot` / `MetricsCollector`（Prometheus /metrics 解析）
+  - `bidkv.experiments.vllm.runner`: `VLLMExperimentRunner`（async 并发发送 + SSE streaming TTFT 测量 + CLI）
+  - `bidkv.experiments.vllm.analysis`: 聚合 + CI95 + Oracle gap + 6 张论文图（SLO violation bar / Pareto front / Oracle gap / Compression coverage）+ Table 1 数据
+  - 策略覆盖: preempt-evict / static-random / h2o-style / uniform / global-nobid / slack-aware / bidkv / oracle-dp
+  - 负载覆盖: chat (ShareGPT) / summarization (CNN/DM) / QA (LongBench)
+  - Candidate-universe consistency 验证: 每 run 结束后检查所有策略接收同一候选集
+  - 43 个测试全部通过
+
 - **Baselines Implementation** (#046): 7 个 baseline 策略 + Oracle DP 上界
   - `bidkv.baselines.BaselineStrategy` ABC + `CompressionAction` / `RequestState` 数据类型
   - `bidkv.baselines.BaselineRegistry`: 策略注册表，支持 `create_default_registry()` 一键注册全部 8 个策略
@@ -61,6 +72,11 @@ All notable changes to this project will be documented in this file.
   - Baseline Spec 预注册文档: `docs/baseline-specs.md`
 
 ### Fixed
+
+- **SGLang Adapter Bug Fixes** (#045):
+  - `scheduler_hook.py`: `uninstall_scheduler_hook()` 无法恢复原始方法——install 时未设置 `__wrapped__` 属性，uninstall 跳过恢复逻辑。同时修复 RadixCache eviction hook 的 `__wrapped__` 缺失及 uninstall 遗漏
+  - `radix_hook.py`: `_is_shared_slot()` 始终返回 `False`——实现了基于 RadixCache 节点 `lock_ref` 和 running batch token 映射的双重共享检测
+  - `adapter.py`: `_AdapterMetrics.to_dict()` 重命名为 `as_dict()`，与 vLLM adapter 对齐
 
 - **Algorithm Corrections S01+S04+S07** (#042): 三项算法层语义修正
   - Fix S01 (#018): PressureDetector 保证使用瞬时值，无滚动窗口平滑——已验证并添加显式文档保证
