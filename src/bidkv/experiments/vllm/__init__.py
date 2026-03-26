@@ -1,4 +1,4 @@
-"""bidkv.experiments.vllm — vLLM 7-baseline + Oracle 完整实验框架。
+"""bidkv.experiments.vllm — vLLM 7-baseline 完整实验框架。
 
 论文 §6 Evaluation 的主要数据来源。
 

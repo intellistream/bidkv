@@ -10,7 +10,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from bidkv.protocol.bid import CompressionBid, make_bid_id
+from bidkv.protocol.bid import CompressionBid
+from bidkv.scoring.bid_builder import build_bids
 
 
 class UniformScoring:
@@ -66,38 +67,22 @@ class UniformScoring:
         compression_levels: Sequence[float],
         **context: Any,
     ) -> list[CompressionBid]:
-        """基于均匀评分生成 CompressionBid。
-
-        由于所有 token 等权，quality_delta 与压缩比例成正比。
-        """
+        """基于均匀评分生成 CompressionBid。"""
         n = len(token_ids)
         if n == 0:
             return []
 
-        bids = []
-        for level_idx, level in enumerate(compression_levels):
-            tokens_to_remove = max(1, int(n * level))
-            tokens_freed = min(tokens_to_remove, n - 1)
-            if tokens_freed <= 0:
-                continue
+        scores = self.score(token_ids, **context)
 
-            # Uniform scoring 下，quality_delta 正比于压缩比例
-            quality_delta = min(1.0, self._uniform_score * (tokens_freed / n))
-
-            bid = CompressionBid(
-                bid_id=make_bid_id(request_id, level_idx),
-                request_id=request_id,
-                algorithm_id=self._algorithm_id,
-                tokens_freed=tokens_freed,
-                quality_delta=quality_delta,
-                compress_latency_ms=0.1 * tokens_freed,
-                confidence=1.0,  # 均匀分布无不确定性
-                metadata={
-                    "compression_level": level,
-                    "uniform_score": self._uniform_score,
-                    "scoring_method": "uniform",
-                },
-            )
-            bids.append(bid)
-
-        return bids
+        return build_bids(
+            request_id=request_id,
+            token_ids=token_ids,
+            scores=scores,
+            compression_levels=compression_levels,
+            algorithm_id=self._algorithm_id,
+            confidence_fn=lambda: 1.0,
+            extra_metadata={
+                "uniform_score": self._uniform_score,
+                "scoring_method": "uniform",
+            },
+        )

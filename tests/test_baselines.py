@@ -3,7 +3,7 @@
 测试覆盖：
 - BaselineStrategy ABC / CompressionAction / RequestState 数据类型
 - BaselineRegistry 注册与获取
-- 7 个 baseline + Oracle DP 各 ≥ 3 个测试
+- 7 个 baseline 各 ≥ 3 个测试
 - Candidate-universe consistency（所有 baseline 使用同一候选池）
 - H2O-Style ≠ H2OScoring 区分验证
 """
@@ -19,7 +19,6 @@ from bidkv.baselines import (
     CompressionAction,
     GlobalNoBidStrategy,
     H2OStyleStrategy,
-    OracleDPStrategy,
     PreemptEvictStrategy,
     RequestState,
     SlackAwareStrategy,
@@ -184,8 +183,8 @@ class TestBaselineRegistry:
     def test_create_default_registry(self) -> None:
         registry = BaselineRegistry()
         registry.create_default_registry()
-        assert registry.count == 8
-        # 验证所有 8 个策略都已注册
+        assert registry.count == 7
+        # 验证所有 7 个策略都已注册
         for name in [
             "preempt-evict",
             "static-random",
@@ -194,7 +193,6 @@ class TestBaselineRegistry:
             "global-nobid",
             "slack-aware",
             "bidkv",
-            "oracle-dp",
         ]:
             assert isinstance(registry.get(name), BaselineStrategy)
 
@@ -512,89 +510,6 @@ class TestBidKV:
 
 
 # ===========================================================================
-# Oracle DP tests
-# ===========================================================================
-
-
-class TestOracleDP:
-    """Oracle DP baseline 测试。"""
-
-    def test_name(self) -> None:
-        assert OracleDPStrategy().name == "oracle-dp"
-
-    def test_optimal_single_request(self) -> None:
-        """单请求场景：DP 应选择满足需求且 delta 最小的 bid。"""
-        req = RequestState("req-1", current_tokens=200, token_ids=tuple(range(200)))
-        bids = _make_bids_for_request("req-1", req.token_ids)
-        strategy = OracleDPStrategy(delta_budget=0.5)
-        actions = strategy.select_victims([req], needed_tokens=30, bids_by_request={"req-1": bids})
-        assert len(actions) >= 1
-        freed = sum(a.target_tokens for a in actions)
-        assert freed >= 30
-
-    def test_respects_delta_budget(self) -> None:
-        """Oracle 遵守 delta_budget 约束。"""
-        candidates = _make_candidates_varied()
-        bids_by_request: dict[str, list[CompressionBid]] = {}
-        for req in candidates:
-            bids_by_request[req.request_id] = _make_bids_for_request(req.request_id, req.token_ids)
-        # 使用足够大的 delta_budget 使得至少有 bid 被选中
-        strategy = OracleDPStrategy(delta_budget=0.3, dp_resolution=500)
-        actions = strategy.select_victims(
-            candidates, needed_tokens=100, bids_by_request=bids_by_request
-        )
-        # 所有选中 bid 的 delta 之和不超过 delta_budget（允许离散化误差）
-        total_delta = sum(a.metadata.get("quality_delta", 0) for a in actions)
-        # 离散化精度：每步 = 0.3/500 = 0.0006，实际 delta 可能偏差 ≤ 1 步
-        assert total_delta <= 0.3 + 0.001
-
-    def test_at_most_one_bid_per_request(self) -> None:
-        """Grouped Knapsack 约束：每个 request 最多一个 bid。"""
-        candidates = _make_candidates(3, tokens_per_req=200)
-        bids_by_request: dict[str, list[CompressionBid]] = {}
-        for req in candidates:
-            bids_by_request[req.request_id] = _make_bids_for_request(req.request_id, req.token_ids)
-        strategy = OracleDPStrategy(delta_budget=0.5)
-        actions = strategy.select_victims(
-            candidates, needed_tokens=50, bids_by_request=bids_by_request
-        )
-        request_ids = [a.request_id for a in actions]
-        # 每个 request_id 最多出现一次
-        assert len(request_ids) == len(set(request_ids))
-
-    def test_empty_candidates(self) -> None:
-        strategy = OracleDPStrategy()
-        assert strategy.select_victims([], needed_tokens=100) == []
-
-    def test_invalid_dp_resolution(self) -> None:
-        with pytest.raises(ValueError, match="dp_resolution"):
-            OracleDPStrategy(dp_resolution=0)
-
-    def test_optimal_beats_or_matches_greedy(self) -> None:
-        """Oracle DP 的 freed tokens 应 >= GreedyBidSolver。"""
-        candidates = _make_candidates(4, tokens_per_req=200)
-        bids_by_request: dict[str, list[CompressionBid]] = {}
-        for req in candidates:
-            bids_by_request[req.request_id] = _make_bids_for_request(req.request_id, req.token_ids)
-
-        oracle = OracleDPStrategy(delta_budget=0.15, dp_resolution=500)
-        bidkv = BidKVStrategy(delta_budget=0.15)
-
-        oracle_actions = oracle.select_victims(
-            candidates, needed_tokens=50, bids_by_request=bids_by_request
-        )
-        bidkv_actions = bidkv.select_victims(
-            candidates, needed_tokens=50, bids_by_request=bids_by_request
-        )
-
-        oracle_freed = sum(a.target_tokens for a in oracle_actions)
-        bidkv_freed = sum(a.target_tokens for a in bidkv_actions)
-
-        # Oracle 应该 >= greedy（或相等，因为 greedy 在某些场景下是最优的）
-        assert oracle_freed >= bidkv_freed
-
-
-# ===========================================================================
 # Candidate-universe consistency tests
 # ===========================================================================
 
@@ -615,7 +530,6 @@ class TestCandidateUniverseConsistency:
             GlobalNoBidStrategy(delta_budget=0.5),
             SlackAwareStrategy(),
             BidKVStrategy(delta_budget=0.5),
-            OracleDPStrategy(delta_budget=0.5),
         ]
 
         # 每个策略都接收同一个 candidates 对象
@@ -644,7 +558,6 @@ class TestCandidateUniverseConsistency:
             GlobalNoBidStrategy(delta_budget=0.5),
             SlackAwareStrategy(),
             BidKVStrategy(delta_budget=0.5),
-            OracleDPStrategy(delta_budget=0.5),
         ]
 
         for strategy in strategies:

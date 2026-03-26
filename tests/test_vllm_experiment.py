@@ -16,7 +16,6 @@ from bidkv.experiments.vllm.analysis import (
     StrategyAggregation,
     aggregate_results,
     compute_ci95,
-    compute_oracle_gap,
     export_summary_json,
     generate_table1_data,
 )
@@ -59,13 +58,14 @@ class TestExperimentConfig:
         assert config.strategies == ALL_STRATEGIES
         assert config.workloads == ALL_WORKLOADS
         assert config.runs_per_combo == 3
-        assert config.total_runs == 8 * 3 * 3 * 3  # 216
+        assert config.total_runs == 7 * 2 * 3 * 3  # 126
 
     def test_custom_config(self) -> None:
         config = ExperimentConfig(
             strategies=("preempt-evict", "bidkv"),
-            workloads=("chat",),
-            concurrency_levels=(8,),
+            workloads=("mixed",),
+            request_rates=(2.0,),
+            workload_rates={"mixed": (2.0,), "long_context": (0.35,)},
             runs_per_combo=2,
         )
         assert config.total_runs == 2 * 1 * 1 * 2  # 4
@@ -76,7 +76,7 @@ class TestExperimentConfig:
 
     def test_invalid_workload_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown workloads"):
-            ExperimentConfig(workloads=("not-a-workload",))
+            ExperimentConfig(workloads=("chat",))
 
     def test_invalid_runs_raises(self) -> None:
         with pytest.raises(ValueError, match="runs_per_combo must be >= 1"):
@@ -84,8 +84,8 @@ class TestExperimentConfig:
 
     def test_run_label(self) -> None:
         config = ExperimentConfig()
-        label = config.run_label("bidkv", "chat", 16, 2)
-        assert label == "bidkv__chat__c16__r2"
+        label = config.run_label("bidkv", "mixed", 2.0, 2)
+        assert label == "bidkv__mixed__rate2.0__r2"
 
 
 class TestVLLMServerConfig:
@@ -206,10 +206,10 @@ class TestRunResult:
 
     def _make_run_result(self) -> RunResult:
         return RunResult(
-            run_label="bidkv__chat__c8__r0",
+            run_label="bidkv__mixed__rate2.0__r0",
             strategy="bidkv",
-            workload="chat",
-            concurrency=8,
+            workload="mixed",
+            request_rate=2.0,
             run_index=0,
             start_time=1000.0,
             end_time=1010.0,
@@ -259,11 +259,11 @@ class TestRunResult:
         p99 = r.compute_p99_ttft_ms()
         assert p99 == 100.0
 
-    def test_slo_violation_rate(self) -> None:
+    def test_slo_attainment_rate(self) -> None:
         r = self._make_run_result()
-        # SLO target 2000ms → 1/3 违反 (ttft=2500)
-        rate = r.compute_slo_violation_rate(2000.0)
-        assert abs(rate - 1 / 3) < 1e-6
+        # SLO target 2000ms → 2/3 attain (ttft=50, 100 pass; ttft=2500 fails)
+        rate = r.compute_slo_attainment_rate(2000.0)
+        assert abs(rate - 2 / 3) < 1e-6
 
 
 class TestRunResultPersistence:
@@ -271,10 +271,10 @@ class TestRunResultPersistence:
 
     def test_save_and_load(self, tmp_path: pytest.TempPathFactory) -> None:
         result = RunResult(
-            run_label="test__chat__c8__r0",
+            run_label="test__mixed__rate2.0__r0",
             strategy="bidkv",
-            workload="chat",
-            concurrency=8,
+            workload="mixed",
+            request_rate=2.0,
             run_index=0,
             start_time=1000.0,
             end_time=1010.0,
@@ -291,19 +291,19 @@ class TestRunResultPersistence:
         path = save_run_result(result, tmp_path)
         loaded = load_run_result(path)
 
-        assert loaded.run_label == "test__chat__c8__r0"
+        assert loaded.run_label == "test__mixed__rate2.0__r0"
         assert loaded.strategy == "bidkv"
-        assert loaded.concurrency == 8
+        assert loaded.request_rate == 2.0
         assert len(loaded.request_results) == 1
         assert loaded.request_results[0].ttft_ms == 50.0
         assert loaded.adapter_metrics["total_compressions"] == 5
 
     def test_save_with_candidate_snapshots(self, tmp_path: pytest.TempPathFactory) -> None:
         result = RunResult(
-            run_label="test__chat__c8__r0",
+            run_label="test__mixed__rate2.0__r0",
             strategy="bidkv",
-            workload="chat",
-            concurrency=8,
+            workload="mixed",
+            request_rate=2.0,
             run_index=0,
             candidate_snapshots=[
                 CandidateSnapshot(
@@ -357,10 +357,10 @@ class TestAggregation:
         for run_idx in range(3):
             results.append(
                 RunResult(
-                    run_label=f"bidkv__chat__c8__r{run_idx}",
+                    run_label=f"bidkv__mixed__rate2.0__r{run_idx}",
                     strategy="bidkv",
-                    workload="chat",
-                    concurrency=8,
+                    workload="mixed",
+                    request_rate=2.0,
                     run_index=run_idx,
                     start_time=1000.0,
                     end_time=1010.0,
@@ -387,8 +387,8 @@ class TestAggregation:
         aggs = aggregate_results(results)
         assert len(aggs) == 1
         assert aggs[0].strategy == "bidkv"
-        assert aggs[0].workload == "chat"
-        assert aggs[0].concurrency == 8
+        assert aggs[0].workload == "mixed"
+        assert aggs[0].request_rate == 2.0
         assert aggs[0].runs == 3
 
     def test_aggregate_mean_values(self) -> None:
@@ -406,49 +406,6 @@ class TestAggregation:
         assert agg.p99_ttft_ms_ci95 >= 0
 
 
-class TestOracleGap:
-    """Oracle Gap 计算测试。"""
-
-    def test_oracle_gap_basic(self) -> None:
-        aggs = [
-            StrategyAggregation(
-                strategy="bidkv",
-                workload="chat",
-                concurrency=8,
-                slo_violation_rate_mean=0.10,
-            ),
-            StrategyAggregation(
-                strategy="oracle-dp",
-                workload="chat",
-                concurrency=8,
-                slo_violation_rate_mean=0.05,
-            ),
-        ]
-        gaps = compute_oracle_gap(aggs)
-        assert "chat__c8" in gaps
-        # gap = (0.10 - 0.05) / 0.05 = 1.0 (100%)
-        assert abs(gaps["chat__c8"] - 1.0) < 1e-6
-
-    def test_oracle_gap_zero_oracle(self) -> None:
-        aggs = [
-            StrategyAggregation(
-                strategy="bidkv",
-                workload="chat",
-                concurrency=8,
-                slo_violation_rate_mean=0.03,
-            ),
-            StrategyAggregation(
-                strategy="oracle-dp",
-                workload="chat",
-                concurrency=8,
-                slo_violation_rate_mean=0.0,
-            ),
-        ]
-        gaps = compute_oracle_gap(aggs)
-        # Oracle = 0 时，gap = BidKV 的绝对值
-        assert abs(gaps["chat__c8"] - 0.03) < 1e-6
-
-
 class TestTable1:
     """Table 1 生成测试。"""
 
@@ -457,8 +414,7 @@ class TestTable1:
         strategies = {row["strategy"] for row in table}
         assert "h2o-style" in strategies  # H2O-Style 必须出现
         assert "bidkv" in strategies
-        assert "oracle-dp" in strategies
-        assert len(strategies) == 8
+        assert len(strategies) == 7
 
     def test_table1_h2o_style_present(self) -> None:
         """H2O-Style 必须出现在 Table 1 中（issue-047 验收标准）。"""
@@ -476,20 +432,18 @@ class TestExportSummary:
         aggs = [
             StrategyAggregation(
                 strategy="bidkv",
-                workload="chat",
-                concurrency=8,
+                workload="mixed",
+                request_rate=2.0,
                 runs=3,
                 throughput_rps_mean=1.5,
                 p99_ttft_ms_mean=500.0,
-                slo_violation_rate_mean=0.05,
+                slo_attainment_rate_mean=0.05,
             )
         ]
-        gaps = {"chat__c8": 0.5}
-        path = export_summary_json(aggs, gaps, tmp_path)
+        path = export_summary_json(aggs, tmp_path)
 
         data = json.loads(path.read_text())
         assert len(data["aggregations"]) == 1
-        assert data["oracle_gaps"]["chat__c8"] == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -501,25 +455,26 @@ class TestParseArgs:
     """命令行参数解析测试。"""
 
     def test_default_args(self) -> None:
-        config = parse_args([])
+        config, resume = parse_args([])
         assert config.strategies == ALL_STRATEGIES
         assert config.workloads == ALL_WORKLOADS
         assert config.runs_per_combo == 3
+        assert resume is False
 
     def test_custom_strategies(self) -> None:
-        config = parse_args(["--strategies", "preempt-evict,bidkv"])
+        config, _ = parse_args(["--strategies", "preempt-evict,bidkv"])
         assert config.strategies == ("preempt-evict", "bidkv")
 
     def test_custom_workloads(self) -> None:
-        config = parse_args(["--workloads", "chat"])
-        assert config.workloads == ("chat",)
+        config, _ = parse_args(["--workloads", "mixed"])
+        assert config.workloads == ("mixed",)
 
-    def test_custom_concurrency(self) -> None:
-        config = parse_args(["--concurrency-levels", "4,8"])
-        assert config.concurrency_levels == (4, 8)
+    def test_custom_rates(self) -> None:
+        config, _ = parse_args(["--request-rates", "1.5,3.0"])
+        assert config.request_rates == (1.5, 3.0)
 
     def test_custom_runs(self) -> None:
-        config = parse_args(["--runs", "5"])
+        config, _ = parse_args(["--runs", "5"])
         assert config.runs_per_combo == 5
 
 
@@ -533,10 +488,10 @@ class TestCandidateConsistency:
     def test_consistency_with_snapshots(self) -> None:
         results = [
             RunResult(
-                run_label="bidkv__chat__c8__r0",
+                run_label="bidkv__mixed__rate2.0__r0",
                 strategy="bidkv",
-                workload="chat",
-                concurrency=8,
+                workload="mixed",
+                request_rate=2.0,
                 run_index=0,
                 candidate_snapshots=[
                     CandidateSnapshot(
@@ -549,10 +504,10 @@ class TestCandidateConsistency:
                 ],
             ),
             RunResult(
-                run_label="h2o-style__chat__c8__r0",
+                run_label="h2o-style__mixed__rate2.0__r0",
                 strategy="h2o-style",
-                workload="chat",
-                concurrency=8,
+                workload="mixed",
+                request_rate=2.0,
                 run_index=0,
                 candidate_snapshots=[
                     CandidateSnapshot(
@@ -575,8 +530,8 @@ class TestVLLMExperimentRunner:
     def test_runner_construction(self) -> None:
         config = ExperimentConfig(
             strategies=("preempt-evict",),
-            workloads=("chat",),
-            concurrency_levels=(8,),
+            workloads=("mixed",),
+            request_rates=(2.0,),
             runs_per_combo=1,
         )
         runner = VLLMExperimentRunner(config)

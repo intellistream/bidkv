@@ -1,4 +1,4 @@
-"""Experiment configuration for vLLM 7-baseline experiment.
+"""Experiment configuration for vLLM baseline experiment.
 
 所有实验参数集中管理，确保 reproducibility。
 """
@@ -16,7 +16,6 @@ STRATEGY_UNIFORM = "uniform"
 STRATEGY_GLOBAL_NOBID = "global-nobid"
 STRATEGY_SLACK_AWARE = "slack-aware"
 STRATEGY_BIDKV = "bidkv"
-STRATEGY_ORACLE_DP = "oracle-dp"
 
 ALL_STRATEGIES: tuple[str, ...] = (
     STRATEGY_PREEMPT_EVICT,
@@ -26,22 +25,36 @@ ALL_STRATEGIES: tuple[str, ...] = (
     STRATEGY_GLOBAL_NOBID,
     STRATEGY_SLACK_AWARE,
     STRATEGY_BIDKV,
-    STRATEGY_ORACLE_DP,
 )
 
-# 工作负载常量
-WORKLOAD_CHAT = "chat"
-WORKLOAD_SUMMARIZATION = "summarization"
-WORKLOAD_QA = "qa"
+# 工作负载常量 — 按 §4 设计：Mixed + Long-context
+WORKLOAD_MIXED = "mixed"
+WORKLOAD_LONG_CONTEXT = "long_context"
 
 ALL_WORKLOADS: tuple[str, ...] = (
-    WORKLOAD_CHAT,
-    WORKLOAD_SUMMARIZATION,
-    WORKLOAD_QA,
+    WORKLOAD_MIXED,
+    WORKLOAD_LONG_CONTEXT,
 )
 
-DEFAULT_CONCURRENCY_LEVELS: tuple[int, ...] = (8, 16, 32)
+# ⚠️ FROZEN — RULE RATE-FREEZE: 校准后冻结，不可基于策略表现调整
+# 每个 workload 独立的冻结 rate 值（req/s）
+# Calibration 依据（Issue #055）：
+#   mixed:        tput 2.06→3.32→3.84(饱和), p99ttft 356→450→440ms
+#   long_context: tput 0.50→0.63→0.67(饱和), p99ttft 3.2k→4.9k→10kms
+WORKLOAD_REQUEST_RATES: dict[str, tuple[float, ...]] = {
+    WORKLOAD_MIXED: (2.0, 3.8, 5.7),
+    WORKLOAD_LONG_CONTEXT: (0.35, 0.5, 0.7),
+}
+
+# 向后兼容 fallback（不建议使用，优先用 WORKLOAD_REQUEST_RATES）
+DEFAULT_REQUEST_RATES: tuple[float, ...] = (2.0, 3.8, 5.7)
 DEFAULT_RUNS_PER_COMBO = 3
+
+# 每个 workload 的默认请求数 — §4
+WORKLOAD_NUM_REQUESTS: dict[str, int] = {
+    WORKLOAD_MIXED: 1000,
+    WORKLOAD_LONG_CONTEXT: 500,
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +84,10 @@ class VLLMServerConfig:
     max_num_seqs: int = 32
     gpu_memory_utilization: float = 0.85
     enforce_eager: bool = True
+    disable_frontend_multiprocessing: bool = True
+    max_model_len: int = 8192
+    num_gpu_blocks_override: int | None = None
+    execution_mode: str = "tail_truncation"
     host: str = "127.0.0.1"
     port: int = 8000
 
@@ -100,6 +117,12 @@ class VLLMServerConfig:
         ]
         if self.enforce_eager:
             args.append("--enforce-eager")
+        if self.disable_frontend_multiprocessing:
+            args.append("--disable-frontend-multiprocessing")
+        if self.max_model_len:
+            args.extend(["--max-model-len", str(self.max_model_len)])
+        if self.num_gpu_blocks_override is not None:
+            args.extend(["--num-gpu-blocks-override", str(self.num_gpu_blocks_override)])
         return args
 
 
@@ -129,10 +152,10 @@ class ExperimentConfig:
         要运行的策略名称列表。
     workloads:
         要运行的工作负载列表。
-    concurrency_levels:
-        并发度列表。
+    request_rates:
+        请求到达速率列表 (req/s)，Phase 2 pilot 后冻结。
     runs_per_combo:
-        每个 (策略, 工作负载, 并发度) 组合的独立运行次数。
+        每个 (策略, 工作负载, rate) 组合的独立运行次数。
     output_dir:
         结果输出目录。
     server:
@@ -150,11 +173,19 @@ class ExperimentConfig:
     collect_candidate_snapshots:
         是否收集每个 pressure event 的 candidate pool snapshot
         （用于 candidate-universe consistency 验证）。
+    consecutive_timeout_abort:
+        连续 timeout 请求数达到此值时提前终止 run。
+    run_timeout_s:
+        单次 run 整体挂钟超时（秒）。超时后取消所有 in-flight 请求，
+        run_status 标记为 "timeout"。默认 600（10 分钟）。
     """
 
     strategies: tuple[str, ...] = ALL_STRATEGIES
     workloads: tuple[str, ...] = ALL_WORKLOADS
-    concurrency_levels: tuple[int, ...] = DEFAULT_CONCURRENCY_LEVELS
+    request_rates: tuple[float, ...] = DEFAULT_REQUEST_RATES
+    workload_rates: dict[str, tuple[float, ...]] = field(
+        default_factory=lambda: dict(WORKLOAD_REQUEST_RATES),
+    )
     runs_per_combo: int = DEFAULT_RUNS_PER_COMBO
     output_dir: Path = Path("results/vllm")
     server: VLLMServerConfig = field(default_factory=VLLMServerConfig)
@@ -164,6 +195,8 @@ class ExperimentConfig:
     request_timeout_s: float = 120.0
     server_startup_timeout_s: float = 300.0
     collect_candidate_snapshots: bool = True
+    consecutive_timeout_abort: int = 10
+    run_timeout_s: float = 600.0
 
     def __post_init__(self) -> None:
         unknown = set(self.strategies) - set(ALL_STRATEGIES)
@@ -175,16 +208,19 @@ class ExperimentConfig:
         if self.runs_per_combo < 1:
             raise ValueError(f"runs_per_combo must be >= 1, got {self.runs_per_combo}")
 
+    def get_rates_for_workload(self, workload: str) -> tuple[float, ...]:
+        """返回指定 workload 的冻结 rate 列表。"""
+        return self.workload_rates.get(workload, self.request_rates)
+
     @property
     def total_runs(self) -> int:
         """总实验运行次数。"""
-        return (
-            len(self.strategies)
-            * len(self.workloads)
-            * len(self.concurrency_levels)
-            * self.runs_per_combo
-        )
+        total = 0
+        for workload in self.workloads:
+            rates = self.get_rates_for_workload(workload)
+            total += len(self.strategies) * len(rates) * self.runs_per_combo
+        return total
 
-    def run_label(self, strategy: str, workload: str, concurrency: int, run_idx: int) -> str:
+    def run_label(self, strategy: str, workload: str, request_rate: float, run_idx: int) -> str:
         """生成单次实验运行的标识符。"""
-        return f"{strategy}__{workload}__c{concurrency}__r{run_idx}"
+        return f"{strategy}__{workload}__rate{request_rate}__r{run_idx}"

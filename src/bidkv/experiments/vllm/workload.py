@@ -40,6 +40,7 @@ class RequestTrace:
     request_id: str
     prompt: str
     max_tokens: int
+    arrival_time_ms: float = 0.0
     expected_output: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -62,8 +63,10 @@ class WorkloadTrace:
 
     workload_name: str
     requests: list[RequestTrace]
+    request_rate: float = 0.0
     dataset_source: str = ""
     frozen_at: str = ""
+    seed: int = 42
 
     @property
     def num_requests(self) -> int:
@@ -83,8 +86,11 @@ def save_trace(trace: WorkloadTrace, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "workload_name": trace.workload_name,
+        "request_rate": trace.request_rate,
+        "seed": trace.seed,
         "dataset_source": trace.dataset_source,
         "frozen_at": trace.frozen_at,
+        "num_requests": trace.num_requests,
         "requests": [asdict(r) for r in trace.requests],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -123,6 +129,7 @@ def load_trace(path: Path) -> WorkloadTrace:
             request_id=r["request_id"],
             prompt=r["prompt"],
             max_tokens=r["max_tokens"],
+            arrival_time_ms=r.get("arrival_time_ms", 0.0),
             expected_output=r.get("expected_output", ""),
             metadata=r.get("metadata", {}),
         )
@@ -131,8 +138,10 @@ def load_trace(path: Path) -> WorkloadTrace:
     return WorkloadTrace(
         workload_name=data["workload_name"],
         requests=requests,
+        request_rate=data.get("request_rate", 0.0),
         dataset_source=data.get("dataset_source", ""),
         frozen_at=data.get("frozen_at", ""),
+        seed=data.get("seed", 42),
     )
 
 

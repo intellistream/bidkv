@@ -6,8 +6,9 @@ Provides FrameworkAdapter ABC and per-framework implementations
 
 from __future__ import annotations
 
-from bidkv.adapters.base import FrameworkAdapter
+from bidkv.adapters.base import BaseAdapterMetrics, FrameworkAdapter
 
 __all__ = [
+    "BaseAdapterMetrics",
     "FrameworkAdapter",
 ]

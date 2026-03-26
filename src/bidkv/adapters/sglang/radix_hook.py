@@ -238,14 +238,73 @@ def _get_token_indices(req_to_token_pool: Any, req_pool_idx: int) -> list[int] |
 def _is_shared_slot(scheduler: Any, kv_slot: int, request_id: str) -> bool:
     """检查 KV slot 是否被其他请求共享。
 
-    通过查找 radix tree 中该 slot 对应节点的 ref count 判断。
-    """
-    radix_cache = _get_radix_cache(scheduler)
-    if radix_cache is None:
-        return False  # 无法确认，保守地不标记为共享
+    通过遍历 running batch 中其他请求的 token→KV 映射，检查同一
+    kv_slot 是否出现在不同请求中。如果是，则该 slot 被共享，不可释放。
 
-    # 在 radix cache 中查找 slot — 这是 SGLang 版本相关的
-    # 保守策略：如果无法确认，返回 False（允许释放）
+    同时检查 RadixCache 节点的 lock_ref：ref > 1 表示该节点被多棵
+    子树共享。
+    """
+    # 方法 1：通过 RadixCache 节点 ref count 检查
+    radix_cache = _get_radix_cache(scheduler)
+    if (
+        radix_cache is not None
+        and hasattr(radix_cache, "root_node")
+        and _slot_in_shared_node(radix_cache.root_node, kv_slot)
+    ):
+        return True
+
+    # 方法 2：遍历 running batch 中其他请求的 token 映射
+    req_to_token_pool = _get_req_to_token_pool(scheduler)
+    if req_to_token_pool is None:
+        return False
+
+    running = getattr(scheduler, "running_batch", None)
+    if running is None:
+        return False
+
+    reqs = getattr(running, "reqs", None)
+    if reqs is None:
+        return False
+
+    for req in reqs:
+        rid = getattr(req, "rid", None) or getattr(req, "request_id", None)
+        if str(rid) == str(request_id):
+            continue
+        pool_idx = getattr(req, "req_pool_idx", None)
+        if pool_idx is None:
+            continue
+        indices = _get_token_indices(req_to_token_pool, pool_idx)
+        if indices is not None and kv_slot in indices:
+            return True
+
+    return False
+
+
+def _slot_in_shared_node(node: Any, kv_slot: int) -> bool:
+    """递归检查 kv_slot 是否属于 lock_ref > 1 的 radix tree 节点。"""
+    if node is None:
+        return False
+
+    ref_count = getattr(node, "lock_ref", 0)
+    if ref_count > 1:
+        # 检查此节点管理的 KV slot 范围
+        value = getattr(node, "value", None)
+        if value is not None:
+            if hasattr(value, "tolist"):
+                slots = value.tolist()
+            elif hasattr(value, "__iter__"):
+                slots = list(value)
+            else:
+                slots = []
+            if kv_slot in slots:
+                return True
+
+    children = getattr(node, "children", {})
+    if isinstance(children, dict):
+        for child in children.values():
+            if _slot_in_shared_node(child, kv_slot):
+                return True
+
     return False
 
 

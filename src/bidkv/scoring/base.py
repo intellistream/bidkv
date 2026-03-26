@@ -8,6 +8,12 @@
 - **Practical Scoring**：H2OScoring — 生产部署中实际使用的评分代理
 - **Reference Scoring**：AttentionWeightScoring — 精度上界参考（需 output_attentions）
 - **Auxiliary Scoring**：UniformScoring / RandomScoring — 消融实验用基线
+
+score-only 契约
+---------------
+新增评分策略只需实现 ``score(token_ids, **context) -> list[float]``。
+统一的 bids 生成由 ``bidkv.scoring.bid_builder.build_bids()`` 负责，
+评分策略不再需要实现 ``generate_bids``。
 """
 
 from __future__ import annotations
@@ -15,15 +21,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from bidkv.protocol.bid import CompressionBid
-
 
 @runtime_checkable
 class ScoringStrategy(Protocol):
-    """Token 重要度评分策略。
+    """Token 重要度评分策略（score-only 契约）。
 
-    任何实现 ``score()`` 和 ``generate_bids()`` 方法签名的对象，
+    任何实现 ``score()`` 方法签名的对象，
     都可作为 ScoringStrategy 使用（structural subtyping，无需继承）。
+
+    bids 生成统一由 ``bidkv.scoring.bid_builder.build_bids()`` 负责，
+    scorer 无需实现 ``generate_bids``。
     """
 
     def score(
@@ -44,33 +51,5 @@ class ScoringStrategy(Protocol):
         -------
         list[float]
             长度与 ``token_ids`` 相同的分数列表，值域 [0, 1]，越高越重要。
-        """
-        ...
-
-    def generate_bids(
-        self,
-        request_id: str,
-        token_ids: Sequence[int],
-        compression_levels: Sequence[float],
-        **context: Any,
-    ) -> list[CompressionBid]:
-        """基于评分，针对多个压缩级别生成 CompressionBid。
-
-        Parameters
-        ----------
-        request_id:
-            推理请求 ID。
-        token_ids:
-            Token ID 序列。
-        compression_levels:
-            压缩比例列表（0~1），例如 [0.2, 0.4, 0.6, 0.8]，
-            表示分别尝试保留 80%、60%、40%、20% 的 token。
-        **context:
-            策略特定的上下文信息。
-
-        Returns
-        -------
-        list[CompressionBid]
-            按压缩级别生成的 bid 列表，字段符合 CompressionBid 三层体系。
         """
         ...

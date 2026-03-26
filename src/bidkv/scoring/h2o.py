@@ -33,7 +33,8 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from bidkv.protocol.bid import CompressionBid, make_bid_id
+from bidkv.protocol.bid import CompressionBid
+from bidkv.scoring.bid_builder import build_bids
 
 
 class H2OScoring:
@@ -246,55 +247,27 @@ class H2OScoring:
         list[CompressionBid]
             每个压缩级别对应一个 bid。
         """
-        n = len(token_ids)
-        if n == 0:
-            return []
-
         scores = self.score(token_ids, **context)
-        bids = []
 
-        for level_idx, level in enumerate(compression_levels):
-            tokens_to_remove = max(1, int(n * level))
-            tokens_freed = min(tokens_to_remove, n - 1)  # 至少保留 1 个 token
-            if tokens_freed <= 0:
-                continue
-
-            # 按分数升序排列，取最低分的 tokens_freed 个 token
-            # 这些是将被压缩掉的 token
-            indexed_scores = sorted(enumerate(scores), key=lambda x: x[1])
-            removed_scores = [s for _, s in indexed_scores[:tokens_freed]]
-
-            # quality_delta 估计：被移除 token 的平均重要度
-            # 越重要的 token 被移除，quality_delta 越大
-            avg_removed_importance = sum(removed_scores) / len(removed_scores)
-            # 将 [0, 1] 范围的平均重要度映射为 quality_delta
-            quality_delta = min(1.0, avg_removed_importance)
-
-            # confidence 基于 decode step 数（更多数据 → 更高置信）
+        def _confidence() -> float:
             if self._decode_steps > 0:
-                confidence = min(1.0, 0.5 + 0.1 * math.log1p(self._decode_steps))
-            else:
-                confidence = 0.3  # 无 decode 数据，低置信
+                return min(1.0, 0.5 + 0.1 * math.log1p(self._decode_steps))
+            return 0.3
 
-            bid = CompressionBid(
-                bid_id=make_bid_id(request_id, level_idx),
-                request_id=request_id,
-                algorithm_id=self._algorithm_id,
-                tokens_freed=tokens_freed,
-                quality_delta=quality_delta,
-                compress_latency_ms=0.1 * tokens_freed,  # 估算
-                confidence=confidence,
-                metadata={
-                    "compression_level": level,
-                    "heavy_ratio": self._heavy_ratio,
-                    "recent_ratio": self._recent_ratio,
-                    "decode_steps": self._decode_steps,
-                    "scoring_method": "h2o_cumulative_attention",
-                },
-            )
-            bids.append(bid)
-
-        return bids
+        return build_bids(
+            request_id=request_id,
+            token_ids=token_ids,
+            scores=scores,
+            compression_levels=compression_levels,
+            algorithm_id=self._algorithm_id,
+            confidence_fn=_confidence,
+            extra_metadata={
+                "heavy_ratio": self._heavy_ratio,
+                "recent_ratio": self._recent_ratio,
+                "decode_steps": self._decode_steps,
+                "scoring_method": "h2o_cumulative_attention",
+            },
+        )
 
     def reset(self) -> None:
         """重置累积注意力统计。"""

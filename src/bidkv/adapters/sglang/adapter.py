@@ -7,7 +7,7 @@ SGLang 的 RadixAttention 天然支持部分 KV 释放（tree node invalidation�
 1. KV stats 获取：从 ``TokenToKVPool`` 读取 used/total
 2. Pressure interception：在 RadixAttention LRU 驱逐前获得压缩尝试机会
 3. Compression 执行：通过 radix tree 节点级缩减释放 KV
-4. Scoring 回调：decode step 后更新 H2OScoring
+4. Scoring 回调：decode step 后更新评分策略
 5. Lifecycle 管理：请求完成时清理 bid 和前缀追踪
 
 共享前缀保护：
@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from bidkv.adapters.base import FrameworkAdapter
+from bidkv.adapters.base import BaseAdapterMetrics, FrameworkAdapter
+from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
 from bidkv.config import BidKVConfig
 from bidkv.pool import BidPoolManager
 from bidkv.pressure import PressureConfig, PressureDetector
 from bidkv.scoring.base import ScoringStrategy
+from bidkv.scoring.bid_builder import build_bids
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
 if TYPE_CHECKING:
@@ -50,7 +53,7 @@ class SGLangAdapter(FrameworkAdapter):
     config:
         BidKV 全局配置。
     scoring:
-        评分策略实例（通常为 H2OScoring）。
+        评分策略实例。
     scheduler:
         SGLang 的 Scheduler 实例。若为 None，需在 ``install()`` 前通过
         ``set_scheduler()`` 设置。
@@ -71,9 +74,15 @@ class SGLangAdapter(FrameworkAdapter):
         pressure_config: PressureConfig | None = None,
         solver_config: SolverConfig | None = None,
         compression_levels: Sequence[float] | None = None,
+        experiment_strategy: BaselineStrategy | None = None,
+        experiment_strategy_name: str = "bidkv",
+        audit_dir: Path | None = None,
     ) -> None:
         super().__init__(config, scoring)
         self._scheduler = scheduler
+        self._experiment_strategy: BaselineStrategy | None = experiment_strategy
+        self._experiment_strategy_name: str = experiment_strategy_name
+        self._audit_dir: Path | None = audit_dir
 
         # BidKV 核心组件
         p_cfg = pressure_config or PressureConfig(enabled=config.is_active)
@@ -315,13 +324,21 @@ class SGLangAdapter(FrameworkAdapter):
             return 0
 
         self._metrics.record_pressure_event()
+        tokens_needed = self._pressure_detector.needed_tokens()
+
+        # Fairness audit: 记录压力事件和候选列表
+        self._write_audit(used, total)
+
+        # Strategy routing: baseline strategies use select_victims(),
+        # BidKV uses the full bid pipeline.
+        if self._experiment_strategy is not None and self._experiment_strategy_name != "bidkv":
+            return self._try_compress_baseline(used, total, tokens_needed)
 
         # Step 3: 为追踪的请求刷新 bids
         self._refresh_bids()
 
         # Step 4: Solver 求解
         pool_snapshot = self._pool_manager.get_pool_snapshot()
-        tokens_needed = self._pressure_detector.needed_tokens()
         acceptance = self._solver.solve(
             pool_snapshot,
             tokens_needed,
@@ -340,10 +357,13 @@ class SGLangAdapter(FrameworkAdapter):
         for request_id, token_ids in self._request_tokens.items():
             if not token_ids:
                 continue
-            bids = self._scoring.generate_bids(
+            scores = self._scoring.score(token_ids)
+            bids = build_bids(
                 request_id=request_id,
                 token_ids=token_ids,
+                scores=scores,
                 compression_levels=self._compression_levels,
+                algorithm_id="bidkv",
             )
             self._pool_manager.submit_bids(request_id, bids)
 
@@ -355,6 +375,69 @@ class SGLangAdapter(FrameworkAdapter):
             if bid is None:
                 continue
             freed = self.execute_compression(bid.request_id, bid.tokens_freed)
+            total_freed += freed
+        return total_freed
+
+    # ------------------------------------------------------------------
+    # Fairness audit
+    # ------------------------------------------------------------------
+
+    def _write_audit(self, used: int, total: int) -> None:
+        """Write a fairness audit entry when pressure is detected."""
+        if self._audit_dir is None:
+            return
+        from bidkv.experiments.sglang.collector import write_audit_entry
+
+        candidate_ids = list(self._request_tokens.keys())
+        kv_usage_pct = used / total if total > 0 else 0.0
+        audit_path = self._audit_dir / f"audit_{self._experiment_strategy_name}.jsonl"
+        write_audit_entry(
+            audit_path,
+            candidate_count=len(candidate_ids),
+            candidate_request_ids=candidate_ids,
+            strategy=self._experiment_strategy_name,
+            kv_usage_pct=kv_usage_pct,
+        )
+
+    # ------------------------------------------------------------------
+    # Baseline strategy routing
+    # ------------------------------------------------------------------
+
+    def _try_compress_baseline(self, used: int, total: int, tokens_needed: int) -> int:
+        """Route compression through a BaselineStrategy.select_victims()."""
+        strategy = self._experiment_strategy
+        assert strategy is not None
+
+        candidates = self._build_request_states()
+        if not candidates:
+            return 0
+
+        actions = strategy.select_victims(candidates, tokens_needed)
+        if not actions:
+            return 0
+
+        return self._execute_baseline_actions(actions)
+
+    def _build_request_states(self) -> list[RequestState]:
+        """Build RequestState list from tracked requests."""
+        states: list[RequestState] = []
+        for request_id, token_ids in self._request_tokens.items():
+            if not token_ids:
+                continue
+            states.append(
+                RequestState(
+                    request_id=request_id,
+                    current_tokens=len(token_ids),
+                    token_ids=tuple(token_ids),
+                )
+            )
+        return states
+
+    def _execute_baseline_actions(self, actions: list[CompressionAction]) -> int:
+        """Execute CompressionAction list from a baseline strategy."""
+        total_freed = 0
+        for action in actions:
+            freed = self.execute_compression(action.request_id, action.target_tokens)
             total_freed += freed
         return total_freed
 
@@ -416,6 +499,7 @@ class SGLangAdapter(FrameworkAdapter):
             kill_switch=True,
             delta_budget=self._config.delta_budget,
             max_bids_per_solve=self._config.max_bids_per_solve,
+            execution_mode=self._config.execution_mode,
         )
         self._pool_manager.activate_kill_switch()
         self._solver.update_config(
@@ -436,6 +520,7 @@ class SGLangAdapter(FrameworkAdapter):
             kill_switch=False,
             delta_budget=self._config.delta_budget,
             max_bids_per_solve=self._config.max_bids_per_solve,
+            execution_mode=self._config.execution_mode,
         )
         self._pool_manager.enable()
         self._solver.update_config(
@@ -453,7 +538,7 @@ class SGLangAdapter(FrameworkAdapter):
     # ------------------------------------------------------------------
 
     def on_decode_step(self, request_id: str, attention_pattern: Sequence[float]) -> None:
-        """decode step 完成后的回调，更新 H2O scoring。
+        """decode step 完成后的回调，更新评分策略。
 
         由 h2o_hook.py 在每个 decode step 后调用。
 
@@ -466,50 +551,18 @@ class SGLangAdapter(FrameworkAdapter):
         """
         if not self._config.is_active:
             return
-        # H2OScoring 有 update_from_decode_step 方法
+        # 部分 scoring 策略（如 H2OScoring）支持 decode-step 增量更新
         if hasattr(self._scoring, "update_from_decode_step"):
             self._scoring.update_from_decode_step(attention_pattern)
         self._metrics.record_decode_step(request_id)
 
 
-class _AdapterMetrics:
-    """SGLang adapter 运行指标（与 vLLM adapter 对齐，便于跨框架对比）。"""
+class _AdapterMetrics(BaseAdapterMetrics):
+    """SGLang adapter 运行指标。
 
-    def __init__(self) -> None:
-        self.total_compressions: int = 0
-        self.total_tokens_freed: int = 0
-        self.total_pressure_events: int = 0
-        self.total_requests_completed: int = 0
-        self.total_decode_steps: int = 0
-        self.kill_switch_activations: int = 0
-
-    def record_compression(self, request_id: str, tokens_freed: int) -> None:
-        if tokens_freed > 0:
-            self.total_compressions += 1
-            self.total_tokens_freed += tokens_freed
-
-    def record_pressure_event(self) -> None:
-        self.total_pressure_events += 1
-
-    def record_request_complete(self, request_id: str) -> None:
-        self.total_requests_completed += 1
-
-    def record_decode_step(self, request_id: str) -> None:
-        self.total_decode_steps += 1
-
-    def record_kill_switch(self) -> None:
-        self.kill_switch_activations += 1
-
-    def to_dict(self) -> dict[str, int]:
-        """导出指标字典（directional consistency 对比用）。"""
-        return {
-            "total_compressions": self.total_compressions,
-            "total_tokens_freed": self.total_tokens_freed,
-            "total_pressure_events": self.total_pressure_events,
-            "total_requests_completed": self.total_requests_completed,
-            "total_decode_steps": self.total_decode_steps,
-            "kill_switch_activations": self.kill_switch_activations,
-        }
+    直接复用 ``BaseAdapterMetrics`` 的 6 个跨框架共同字段。
+    SGLang 暂无框架特有指标。
+    """
 
 
 def _get_token_to_kv_pool(scheduler: Any) -> Any | None:

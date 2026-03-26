@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from bidkv.scoring.attention import AttentionWeightScoring
 from bidkv.scoring.base import ScoringStrategy
+from bidkv.scoring.bid_builder import build_bids
 from bidkv.scoring.h2o import H2OScoring
 from bidkv.scoring.random_score import RandomScoring
 from bidkv.scoring.uniform import UniformScoring
@@ -21,4 +22,5 @@ __all__ = [
     "RandomScoring",
     "ScoringStrategy",
     "UniformScoring",
+    "build_bids",
 ]

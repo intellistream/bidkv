@@ -1,0 +1,85 @@
+% fig1_architecture.tex — BidKV Four-Layer Architecture (TikZ)
+% Usage: \input{figures/fig1_architecture}
+%
+% Layout: four layers stacked bottom-to-top by abstraction level.
+% Left arrows (blue, upward)  = invocation / trigger flow
+% Right arrows (orange, downward) = data / result flow
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  layer/.style={draw, rounded corners=3pt, minimum width=6.8cm, minimum height=1.05cm,
+                align=center, font=\small},
+  callarrow/.style={-{Stealth[length=2.5mm]}, thick, blue!60!black},
+  dataarrow/.style={-{Stealth[length=2.5mm]}, thick, orange!70!black},
+  lbl/.style={font=\footnotesize\itshape, text=gray!70!black},
+]
+
+% ---- Layers (bottom = runtime, top = protocol) ----
+
+% Layer 4 — Runtime Adapter (bottom)
+\node[layer, fill=blue!8] (L4) at (0, 0)
+  {\textbf{Runtime Adapter Layer}\\[1pt]
+   {\footnotesize vLLM\;\textbar\;SGLang — pressure detect, execute}};
+
+% Layer 3 — Scoring-to-Bid
+\node[layer, fill=green!8] (L3) at (0, 1.7)
+  {\textbf{Scoring-to-Bid Layer}\\[1pt]
+   {\footnotesize ScoringStrategy $\;\to\;$ \texttt{build\_bids()} $\;\to\;$ BidPool}};
+
+% Layer 2 — Constrained Solver
+\node[layer, fill=orange!10] (L2) at (0, 3.4)
+  {\textbf{Constrained Solver Layer}\\[1pt]
+   {\footnotesize GreedyBidSolver\;(Alg.\,1: $U\!=\!r/(\delta\!+\!\varepsilon)$)}};
+
+% Layer 1 — Bid Signal (protocol definitions)
+\node[layer, fill=red!8] (L1) at (0, 5.1)
+  {\textbf{Bid Signal Layer}\\[1pt]
+   {\footnotesize CompressionBid\;\textbar\;BidPool\;\textbar\;BidAcceptance}};
+
+% External — Application / User
+\node[draw, dashed, rounded corners=3pt, minimum width=6.8cm, minimum height=0.8cm,
+      align=center, font=\small, fill=gray!5] (App) at (0, 6.5)
+  {Application / User / SLO Policy};
+
+% ---- Left side: invocation flow (blue, upward) ----
+\draw[callarrow] ([xshift=-5mm]L4.north) -- ([xshift=-5mm]L3.south)
+  node[midway, left, lbl] {\textcolor{blue!60!black}{\ding{172}} score + build bids};
+\draw[callarrow] ([xshift=-5mm]L3.north) -- ([xshift=-5mm]L2.south)
+  node[midway, left, lbl] {\textcolor{blue!60!black}{\ding{173}} solve(pool, $N$)};
+\draw[callarrow, dashed] ([xshift=-5mm]L1.north) -- ([xshift=-5mm]App.south)
+  node[midway, left, lbl] {quality pref};
+
+% ---- Right side: data / result flow (orange, downward) ----
+\draw[dataarrow] ([xshift=5mm]L3.north) -- ([xshift=5mm]L4.north east |- L3.south)
+  node[midway, right, lbl] {BidPool snapshot};
+\draw[dataarrow] ([xshift=5mm]L2.south) -- ([xshift=5mm]L3.north east |- L2.south)
+  node[midway, right, lbl] {BidAcceptance};
+\draw[dataarrow] ([xshift=5mm]L2.south |- L4.north) -- ([xshift=5mm]L4.north)
+  node[midway, right, lbl] {\textcolor{orange!70!black}{\ding{174}} execute};
+
+% ---- Section annotations (far right) ----
+\node[font=\scriptsize, text=gray, anchor=west] at (3.8, 0)    {\S5};
+\node[font=\scriptsize, text=gray, anchor=west] at (3.8, 1.7)  {\S4.2};
+\node[font=\scriptsize, text=gray, anchor=west] at (3.8, 3.4)  {\S4.3};
+\node[font=\scriptsize, text=gray, anchor=west] at (3.8, 5.1)  {\S4.1};
+
+% ---- Left brace ----
+\draw[decorate, decoration={brace, amplitude=5pt}, thick, gray!60]
+  (-4.0, -0.55) -- (-4.0, 5.65)
+  node[midway, left=8pt, font=\footnotesize, text=gray!70!black, align=center]
+  {Runtime\\execution\\cycle};
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{BidKV four-layer architecture.  Upon KV pressure, the
+adapter~(\ding{172}) invokes the scoring layer to generate bids,
+(\ding{173})~passes the bid pool to the solver, and
+(\ding{174})~executes the returned acceptance via the framework's
+native preemption API.  Blue (left) arrows show the invocation flow;
+orange (right) arrows show the data/result flow.  The bid signal
+layer (top) defines the protocol data structures shared across all
+layers.}
+\label{fig:architecture}
+\end{figure}

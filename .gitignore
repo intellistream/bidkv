@@ -11,3 +11,52 @@ build/
 htmlcov/
 .coverage
 .ruff_cache/
+data/
+
+# Local environment and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and temporary outputs
+*.log
+*.out
+nohup*.out
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.nav
+*.pdfsync
+*.run.xml
+*.snm
+*.synctex.gz
+*.toc
+*.pdf
+
+# Local scratch / accidental files
+=*
+
+# Raw experiment runtime logs and transient outputs
+results/**/*.log
+results/**/server_*.log
+results/*_log*.txt
+results/**/*_log.txt
+results/formal/long_context/
+results/formal/traces/
+results/formal/*.sh
+results/traces_seed99_backup/
+results/formal/traces_seed99_backup/
+results/vllm_24run_full/
+
+# Paper build outputs
+paper/*.pdf
+paper/*.out
+paper/figures/*.pdf
+paper/figures/*.png

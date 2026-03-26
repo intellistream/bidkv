@@ -1,4 +1,4 @@
-"""bidkv baselines — 7 个 baseline 策略 + Oracle DP 上界。
+"""bidkv baselines — 7 个 baseline 策略。
 
 用于论文消融实验，验证 BidKV bid 机制的增量价值。
 所有 baseline 通过 BaselineRegistry 注册和获取。
@@ -20,7 +20,6 @@ from bidkv.baselines.base import (
 from bidkv.baselines.bidkv_strategy import BidKVStrategy
 from bidkv.baselines.global_nobid import GlobalNoBidStrategy
 from bidkv.baselines.h2o_style import H2OStyleStrategy
-from bidkv.baselines.oracle_dp import OracleDPStrategy
 from bidkv.baselines.preempt_evict import PreemptEvictStrategy
 from bidkv.baselines.registry import BaselineRegistry
 from bidkv.baselines.slack_aware import SlackAwareStrategy
@@ -39,7 +38,6 @@ __all__ = [
     "BidKVStrategy",
     "GlobalNoBidStrategy",
     "H2OStyleStrategy",
-    "OracleDPStrategy",
     "PreemptEvictStrategy",
     "SlackAwareStrategy",
     "StaticRandomStrategy",

@@ -288,8 +288,8 @@ class TestMetrics:
     """Metrics 输出格式与 vLLM adapter 对齐。"""
 
     def test_metrics_dict_format(self, active_adapter: SGLangAdapter) -> None:
-        """metrics.to_dict() 返回标准字段。"""
-        m = active_adapter.metrics.to_dict()
+        """metrics.as_dict() 返回标准字段。"""
+        m = active_adapter.metrics.as_dict()
         expected_keys = {
             "total_compressions",
             "total_tokens_freed",
@@ -308,7 +308,7 @@ class TestMetrics:
         active_adapter.metrics.record_compression("req-1", 50)
         active_adapter.metrics.record_decode_step("req-1")
 
-        m = active_adapter.metrics.to_dict()
+        m = active_adapter.metrics.as_dict()
         assert m["total_pressure_events"] == 2
         assert m["total_compressions"] == 1
         assert m["total_tokens_freed"] == 50
@@ -367,6 +367,43 @@ class TestSchedulerHook:
         )
         with pytest.raises(RuntimeError, match="get_next_batch_to_run"):
             install_scheduler_hook(BadScheduler(), adapter)
+
+    def test_uninstall_restores_original_method(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """uninstall 后 scheduler.get_next_batch_to_run 应恢复为原始方法。"""
+        from bidkv.adapters.sglang.scheduler_hook import (
+            install_scheduler_hook,
+            uninstall_scheduler_hook,
+        )
+
+        class FakeScheduler:
+            def get_next_batch_to_run(self) -> str:
+                return "original"
+
+        scheduler = FakeScheduler()
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            scheduler=scheduler,
+            pressure_config=PressureConfig(enabled=True),
+            solver_config=SolverConfig(enabled=True),
+        )
+
+        install_scheduler_hook(scheduler, adapter)
+
+        # patched method 应有 __wrapped__ 属性
+        patched = scheduler.get_next_batch_to_run
+        assert hasattr(patched, "__wrapped__"), "patched method must have __wrapped__"
+        # patched 不是原始方法（是闭包）
+        assert patched() == "original"
+
+        # uninstall 应恢复原始方法
+        uninstall_scheduler_hook(scheduler)
+        restored = scheduler.get_next_batch_to_run
+        assert not hasattr(restored, "__wrapped__"), "restored method should not have __wrapped__"
+        assert restored() == "original"
 
 
 # ===========================================================================
@@ -428,3 +465,97 @@ class TestRadixHook:
 
         result = get_shared_prefix_positions(FakeScheduler(), "req-1", 100)
         assert result == set()
+
+
+# ===========================================================================
+# Test: Baseline 策略路由
+# ===========================================================================
+
+
+class TestBaselineRouting:
+    """SGLangAdapter 策略路由测试。"""
+
+    def test_default_strategy_is_bidkv(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """默认 experiment_strategy_name 为 bidkv。"""
+        adapter = SGLangAdapter(config=active_config, scoring=h2o_scoring)
+        assert adapter._experiment_strategy_name == "bidkv"
+        assert adapter._experiment_strategy is None
+
+    def test_custom_strategy_stored(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """自定义策略正确保存。"""
+        from bidkv.baselines import BaselineRegistry
+
+        registry = BaselineRegistry()
+        registry.create_default_registry()
+        strategy = registry.get("slack-aware")
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy=strategy,
+            experiment_strategy_name="slack_aware",
+        )
+        assert adapter._experiment_strategy is strategy
+        assert adapter._experiment_strategy_name == "slack_aware"
+
+    def test_build_request_states(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """_build_request_states 正确构建候选列表。"""
+        adapter = SGLangAdapter(config=active_config, scoring=h2o_scoring)
+        adapter.track_request("req-1", [1, 2, 3])
+        adapter.track_request("req-2", [4, 5])
+
+        states = adapter._build_request_states()
+        assert len(states) == 2
+        ids = {s.request_id for s in states}
+        assert ids == {"req-1", "req-2"}
+
+    def test_baseline_route_skips_bidkv_pipeline(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """非 bidkv 策略走 _try_compress_baseline 路径。"""
+        from bidkv.baselines import BaselineRegistry
+
+        registry = BaselineRegistry()
+        registry.create_default_registry()
+        strategy = registry.get("slack-aware")
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            pressure_config=PressureConfig(enabled=True, threshold_pct=0.50),
+            solver_config=SolverConfig(enabled=True, delta_budget=0.3),
+            experiment_strategy=strategy,
+            experiment_strategy_name="slack_aware",
+        )
+        adapter.track_request("req-1", list(range(100)))
+
+        # _try_compress_baseline is called (not the bid pipeline)
+        # Without scheduler, execute_compression returns 0, so total_freed=0
+        # but it should not raise errors
+        result = adapter._try_compress_baseline(900, 1000, 50)
+        assert result == 0  # no scheduler → execute_compression returns 0
+
+    def test_bidkv_name_uses_full_pipeline(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """strategy_name == 'bidkv' 时使用完整 bid pipeline。"""
+        from bidkv.baselines import BaselineRegistry
+
+        registry = BaselineRegistry()
+        registry.create_default_registry()
+        strategy = registry.get("bidkv")
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy=strategy,
+            experiment_strategy_name="bidkv",
+        )
+        # Even with experiment_strategy set, name=bidkv means full pipeline
+        assert adapter._experiment_strategy_name == "bidkv"

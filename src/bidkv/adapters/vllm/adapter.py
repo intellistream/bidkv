@@ -14,7 +14,7 @@ vLLM v1 移除了 ``BlockSpaceManager`` 抽象和 ``--block-manager-class`` 参�
 1. KV stats 获取：从 ``KVCacheManager.block_pool`` 读取 usage
 2. Pressure interception：在 vLLM preempt 路径前获得压缩尝试机会
 3. Compression 执行：通过 block-level 操作释放 KV（标记 + 释放尾部 blocks）
-4. Scoring 回调：decode step 后更新 H2OScoring
+4. Scoring 回调：decode step 后更新评分策略
 5. Lifecycle 管理：请求完成时清理 bid 和内部状态
 """
 
@@ -24,11 +24,13 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from bidkv.adapters.base import FrameworkAdapter
+from bidkv.adapters.base import BaseAdapterMetrics, FrameworkAdapter
+from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
 from bidkv.config import BidKVConfig
 from bidkv.pool import BidPoolManager
 from bidkv.pressure import PressureConfig, PressureDetector
 from bidkv.scoring.base import ScoringStrategy
+from bidkv.scoring.bid_builder import build_bids
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
 if TYPE_CHECKING:
@@ -51,7 +53,7 @@ class VLLMAdapter(FrameworkAdapter):
     config:
         BidKV 全局配置（feature gate + kill switch）。
     scoring:
-        评分策略实例（通常为 H2OScoring）。
+        评分策略实例。
     scheduler:
         vLLM 的 Scheduler 实例（``vllm.v1.core.sched.scheduler.Scheduler``）。
         若为 None，需在 ``install()`` 前通过 ``set_scheduler()`` 设置。
@@ -72,9 +74,15 @@ class VLLMAdapter(FrameworkAdapter):
         pressure_config: PressureConfig | None = None,
         solver_config: SolverConfig | None = None,
         compression_levels: Sequence[float] | None = None,
+        experiment_strategy: BaselineStrategy | None = None,
+        experiment_strategy_name: str = "bidkv",
     ) -> None:
         super().__init__(config, scoring)
         self._scheduler = scheduler
+
+        # Experiment strategy routing
+        self._experiment_strategy: BaselineStrategy | None = experiment_strategy
+        self._experiment_strategy_name: str = experiment_strategy_name
 
         # BidKV 核心组件
         p_cfg = pressure_config or PressureConfig(enabled=config.is_active)
@@ -210,21 +218,17 @@ class VLLMAdapter(FrameworkAdapter):
         if block_pool is None:
             return (0, 0)
 
-        block_size = getattr(kv_cache_manager, "block_size", None)
+        # vLLM v1: block_size stored on block_pool as hash_block_size
+        block_size = getattr(block_pool, "hash_block_size", None)
         if block_size is None or block_size <= 0:
             return (0, 0)
 
-        num_free = block_pool.get_num_free_blocks()
+        # 直接从 block_pool 获取 total blocks
+        total_blocks = getattr(block_pool, "num_gpu_blocks", 0)
+        if total_blocks <= 0:
+            return (0, 0)
+
         usage = block_pool.get_usage()
-
-        # 估算总 block 数：free / (1 - usage)，避免除零
-        total_blocks = (int(num_free / (1.0 - usage)) if num_free > 0 else 0) if usage < 1.0 else 0
-
-        # 更准确：直接从 block_pool 获取（如果有 _num_blocks 属性）
-        total_blocks_attr = getattr(block_pool, "_num_blocks", None)
-        if total_blocks_attr is not None and total_blocks_attr > 0:
-            total_blocks = total_blocks_attr
-
         total_tokens = total_blocks * block_size
         used_tokens = int(total_tokens * usage)
 
@@ -233,14 +237,8 @@ class VLLMAdapter(FrameworkAdapter):
     def execute_compression(self, request_id: str, target_tokens: int) -> int:
         """在 vLLM 中执行 KV 压缩。
 
-        vLLM 使用 block-level KV 管理，不原生支持 token-level 部分释放。
-        压缩策略：
-
-        1. 获取评分，标记低重要度 token
-        2. 计算可以释放的完整 block 数
-        3. 通过 coordinator 释放尾部 block
-
-        注意：由于 block 对齐限制，实际释放量可能小于 target_tokens。
+        截断 output tokens 后通过 native preempt 释放 KV，
+        recompute 时序列更短，降低 prefill 成本。
 
         Parameters
         ----------
@@ -252,64 +250,162 @@ class VLLMAdapter(FrameworkAdapter):
         Returns
         -------
         int
-            实际释放的 token 数量 (block-aligned)。
+            实际释放的 token 数量。
         """
         if not self._config.is_active:
             return 0
 
+        return self._execute_tail_truncation(request_id, target_tokens)
+
+    def _execute_recompute_fallback(self, request_id: str) -> int:
+        """Internal: preempt request → vLLM frees all KV → recompute on resume.
+
+        Used as the final step of tail_truncation (after output truncation)
+        and by proactive preemption in scheduler_hook.
+        Zero coordinator manipulation. Zero crash risk.
+
+        Uses ``Scheduler._preempt_request()`` — the same internal API that
+        vLLM itself calls within ``schedule()`` for native preemption.
+
+        Returns
+        -------
+        int
+            释放的 token 数量（即该 request 的全部追踪 token）。
+        """
+        if self._scheduler is None:
+            return 0
+
         token_ids = self._request_tokens.get(request_id)
-        if not token_ids:
-            logger.debug("execute_compression: no tokens tracked for request %s", request_id)
+        total_tokens = len(token_ids) if token_ids else 0
+        if total_tokens == 0:
             return 0
 
-        # 获取 block_size 用于对齐
-        block_size = self._get_block_size()
-        if block_size <= 0:
+        # Look up the vLLM Request object
+        requests_dict = getattr(self._scheduler, "requests", None)
+        if requests_dict is None:
+            return 0
+        request_obj = requests_dict.get(request_id)
+        if request_obj is None:
             return 0
 
-        # 获取评分
-        scores = self._scoring.score(token_ids)
-        if len(scores) != len(token_ids):
-            logger.warning(
-                "execute_compression: score length mismatch (scores=%d, tokens=%d)",
-                len(scores),
-                len(token_ids),
-            )
+        # Only preempt RUNNING requests
+        try:
+            from vllm.v1.request import RequestStatus
+        except ImportError:
+            return 0
+        if request_obj.status != RequestStatus.RUNNING:
             return 0
 
-        # 计算需要释放的 block 数量（向下对齐到 block_size）
-        blocks_to_free = target_tokens // block_size
-        if blocks_to_free <= 0:
+        # Remove from running queue (required before calling _preempt_request)
+        running = getattr(self._scheduler, "running", None)
+        if running is None:
             return 0
+        try:
+            running.remove(request_obj)
+        except ValueError:
+            return 0  # not in running list
 
-        tokens_to_free = blocks_to_free * block_size
+        # Use vLLM native preempt — the ONLY safe way to release KV.
+        # This is the same API vLLM calls inside schedule() for preemption:
+        # frees KV blocks, resets computed tokens, puts request back in waiting.
+        import time
 
-        # 确保至少保留一部分 token（不完全释放）
-        if tokens_to_free >= len(token_ids):
-            # 最多释放 n-1 个 block 的 token，保留至少一个 block
-            blocks_to_free = max(0, len(token_ids) // block_size - 1)
-            tokens_to_free = blocks_to_free * block_size
+        self._scheduler._preempt_request(request_obj, time.monotonic())
 
-        if tokens_to_free <= 0:
-            return 0
+        # Clear prev_step tracking so the preempted request doesn't trigger
+        # the "assert not scheduled_in_prev_step" in _make_cached_request_data
+        # when it re-enters the waiting queue and gets re-scheduled.
+        prev_ids = getattr(self._scheduler, "prev_step_scheduled_req_ids", None)
+        if prev_ids is not None:
+            prev_ids.discard(request_id)
 
-        # 实际释放逻辑：通过 vLLM 的 block 管理释放
-        actual_freed = self._free_tail_blocks(request_id, blocks_to_free, block_size)
+        # Clean up BidKV internal state
+        self._request_tokens.pop(request_id, None)
+        self._pool_manager.remove_by_request(request_id)
+        self._metrics.record_compression(request_id, total_tokens)
 
-        if actual_freed > 0:
-            # 更新内部追踪：缩减 token 列表
-            remaining_count = max(1, len(token_ids) - actual_freed)
-            self._request_tokens[request_id] = token_ids[:remaining_count]
-
-        self._metrics.record_compression(request_id, actual_freed)
         logger.debug(
-            "execute_compression: request=%s, target=%d, block_aligned=%d, actual_freed=%d",
+            "_execute_recompute_fallback: request=%s, freed=%d tokens (preempted)",
             request_id,
-            target_tokens,
-            tokens_to_free,
-            actual_freed,
+            total_tokens,
         )
-        return actual_freed
+        return total_tokens
+
+    def _execute_tail_truncation(self, request_id: str, target_tokens: int) -> int:
+        """Truncate output tokens + native preempt for reduced recompute cost.
+
+        Truncates the request's output token lists first, then preempts via
+        vLLM's native preempt/recompute path. When the request is re-scheduled,
+        it recomputes with a shorter sequence (prompt + partial output).
+
+        This avoids the GPUModelRunner InputBatch block-table desync that
+        occurs with direct block removal. vLLM v1's InputBatch only appends
+        new blocks for cached requests; removing blocks directly causes the
+        model runner to reference freed block IDs → CUDA device-side assert.
+
+        Net effect:
+        - Full KV recovery (preemption frees all blocks)
+        - Lower recompute cost (fewer total tokens to prefill)
+        - Permanent KV footprint reduction (truncated output never returns)
+
+        Falls back to pure preemption if the request has no output tokens.
+
+        Returns
+        -------
+        int
+            Actual tokens freed (full request KV via preemption).
+        """
+        if self._scheduler is None:
+            return 0
+
+        requests_dict = getattr(self._scheduler, "requests", None)
+        if requests_dict is None:
+            return self._execute_recompute_fallback(request_id)
+
+        request_obj = requests_dict.get(request_id)
+        if request_obj is None:
+            return self._execute_recompute_fallback(request_id)
+
+        # Truncate output tokens before preemption
+        output_tids = getattr(request_obj, "_output_token_ids", None)
+        all_tids = getattr(request_obj, "_all_token_ids", None)
+        num_prompt = getattr(request_obj, "num_prompt_tokens", 0)
+        current_output_len = len(output_tids) if output_tids else 0
+
+        tokens_truncated = 0
+        if current_output_len > 0 and output_tids is not None and all_tids is not None:
+            tokens_to_cut = min(target_tokens, current_output_len)
+            if tokens_to_cut > 0:
+                new_output_len = current_output_len - tokens_to_cut
+                new_boundary = num_prompt + new_output_len
+                del output_tids[new_output_len:]
+                del all_tids[new_boundary:]
+                tokens_truncated = tokens_to_cut
+                logger.debug(
+                    "Truncated %d output tokens: request=%s (output: %d→%d, total: %d→%d)",
+                    tokens_to_cut,
+                    request_id,
+                    current_output_len,
+                    new_output_len,
+                    num_prompt + current_output_len,
+                    new_boundary,
+                )
+
+        # Delegate to the safe native preemption path.
+        # This frees ALL KV blocks and moves the request to waiting.
+        # When re-scheduled, vLLM rebuilds the block table from scratch
+        # (resumed_from_preemption=True in GPUModelRunner).
+        freed = self._execute_recompute_fallback(request_id)
+
+        if freed > 0 and tokens_truncated > 0:
+            logger.debug(
+                "Truncation complete: request=%s, truncated=%d, freed=%d",
+                request_id,
+                tokens_truncated,
+                freed,
+            )
+
+        return freed
 
     def on_request_complete(self, request_id: str) -> None:
         """请求完成时清理 bid 和内部状态。"""
@@ -350,13 +446,19 @@ class VLLMAdapter(FrameworkAdapter):
             return 0
 
         self._metrics.record_pressure_event()
+        tokens_needed = self._pressure_detector.needed_tokens()
 
+        # Strategy routing: baseline strategies use select_victims(),
+        # BidKV uses the full bid pipeline.
+        if self._experiment_strategy is not None and self._experiment_strategy_name != "bidkv":
+            return self._try_compress_baseline(used, total, tokens_needed)
+
+        # --- BidKV pipeline (default) ---
         # Step 3: 为追踪的请求刷新 bids
         self._refresh_bids()
 
         # Step 4: Solver 求解
         pool_snapshot = self._pool_manager.get_pool_snapshot()
-        tokens_needed = self._pressure_detector.needed_tokens()
         acceptance = self._solver.solve(
             pool_snapshot,
             tokens_needed,
@@ -368,6 +470,62 @@ class VLLMAdapter(FrameworkAdapter):
 
         # Step 5: 执行压缩
         total_freed = self._execute_acceptance(acceptance)
+        from bidkv.adapters.vllm.scheduler_hook import _diag
+
+        if total_freed > 0:
+            pct = (used / total * 100) if total > 0 else 0.0
+            _diag(
+                f"compression[bidkv]: freed={total_freed} tokens "
+                f"(kv={pct:.0f}% bids_accepted={acceptance.accepted_count})"
+            )
+        return total_freed
+
+    def _try_compress_baseline(self, used: int, total: int, tokens_needed: int) -> int:
+        """Route compression through a BaselineStrategy.select_victims()."""
+        strategy = self._experiment_strategy
+        assert strategy is not None  # guarded by caller
+
+        candidates = self._build_request_states()
+        if not candidates:
+            return 0
+
+        actions = strategy.select_victims(candidates, tokens_needed)
+        if not actions:
+            return 0
+
+        total_freed = self._execute_baseline_actions(actions)
+        from bidkv.adapters.vllm.scheduler_hook import _diag
+
+        if total_freed > 0:
+            pct = (used / total * 100) if total > 0 else 0.0
+            _diag(
+                f"compression[{self._experiment_strategy_name}]: "
+                f"freed={total_freed} tokens "
+                f"(kv={pct:.0f}% actions={len(actions)})"
+            )
+        return total_freed
+
+    def _build_request_states(self) -> list[RequestState]:
+        """Build RequestState list from tracked requests."""
+        states: list[RequestState] = []
+        for request_id, token_ids in self._request_tokens.items():
+            if not token_ids:
+                continue
+            states.append(
+                RequestState(
+                    request_id=request_id,
+                    current_tokens=len(token_ids),
+                    token_ids=tuple(token_ids),
+                )
+            )
+        return states
+
+    def _execute_baseline_actions(self, actions: list[CompressionAction]) -> int:
+        """Execute CompressionAction list from a baseline strategy."""
+        total_freed = 0
+        for action in actions:
+            freed = self.execute_compression(action.request_id, action.target_tokens)
+            total_freed += freed
         return total_freed
 
     def try_compress_for_request(self, needed_blocks: int) -> int:
@@ -399,6 +557,10 @@ class VLLMAdapter(FrameworkAdapter):
         self._pressure_detector.update_stats(used, total)
         self._metrics.record_pressure_event()
 
+        # Strategy routing
+        if self._experiment_strategy is not None and self._experiment_strategy_name != "bidkv":
+            return self._try_compress_baseline(used, total, needed_tokens)
+
         # 刷新 bids
         self._refresh_bids()
 
@@ -421,14 +583,17 @@ class VLLMAdapter(FrameworkAdapter):
     # ------------------------------------------------------------------
 
     def _refresh_bids(self) -> None:
-        """为所有追踪的请求重新生成 bids。"""
+        """为所有追踪的请求重新生成 bids（score → build_bids 统一链路）。"""
         for request_id, token_ids in self._request_tokens.items():
             if not token_ids:
                 continue
-            bids = self._scoring.generate_bids(
+            scores = self._scoring.score(token_ids)
+            bids = build_bids(
                 request_id=request_id,
                 token_ids=token_ids,
+                scores=scores,
                 compression_levels=self._compression_levels,
+                algorithm_id="bidkv",
             )
             self._pool_manager.submit_bids(request_id, bids)
 
@@ -450,71 +615,11 @@ class VLLMAdapter(FrameworkAdapter):
         kv_cache_manager = getattr(self._scheduler, "kv_cache_manager", None)
         if kv_cache_manager is None:
             return 0
-        block_size = getattr(kv_cache_manager, "block_size", None)
-        return block_size if block_size and block_size > 0 else 0
-
-    def _free_tail_blocks(self, request_id: str, num_blocks: int, block_size: int) -> int:
-        """通过 vLLM 的 KV cache coordinator 释放请求的尾部 block。
-
-        vLLM v1 的 KVCacheManager 使用 coordinator 管理 block 分配。
-        释放尾部 block 是最安全的操作，因为不会破坏前缀缓存。
-
-        Parameters
-        ----------
-        request_id:
-            请求 ID。
-        num_blocks:
-            要释放的 block 数量。
-        block_size:
-            每个 block 的 token 数。
-
-        Returns
-        -------
-        int
-            实际释放的 token 数量。
-        """
-        if self._scheduler is None or num_blocks <= 0:
-            return 0
-
-        kv_cache_manager = getattr(self._scheduler, "kv_cache_manager", None)
-        if kv_cache_manager is None:
-            return 0
-
-        coordinator = getattr(kv_cache_manager, "coordinator", None)
-        if coordinator is None:
-            return 0
-
         block_pool = getattr(kv_cache_manager, "block_pool", None)
         if block_pool is None:
             return 0
-
-        # 获取该请求当前的 block 列表
-        try:
-            blocks = coordinator.get_blocks(request_id)
-        except (KeyError, AttributeError):
-            logger.debug("_free_tail_blocks: request %s not found in coordinator", request_id)
-            return 0
-
-        if not blocks:
-            return 0
-
-        # blocks 是 tuple[list[KVCacheBlock], ...] — 每个 kv_cache_group 一个列表
-        # 我们只释放最后 num_blocks 个 block（尾部释放最安全）
-        freed_count = 0
-        for group_blocks in blocks:
-            if not group_blocks:
-                continue
-            n_to_free = min(num_blocks - freed_count, len(group_blocks) - 1)
-            if n_to_free <= 0:
-                continue
-            # 取尾部 block 释放
-            tail_blocks = group_blocks[-n_to_free:]
-            block_pool.free_blocks(tail_blocks)
-            # 从追踪中移除这些 block
-            del group_blocks[-n_to_free:]
-            freed_count += n_to_free
-
-        return freed_count * block_size
+        block_size = getattr(block_pool, "hash_block_size", None)
+        return block_size if block_size and block_size > 0 else 0
 
     # ------------------------------------------------------------------
     # Request tracking
@@ -552,6 +657,7 @@ class VLLMAdapter(FrameworkAdapter):
             kill_switch=True,
             delta_budget=self._config.delta_budget,
             max_bids_per_solve=self._config.max_bids_per_solve,
+            execution_mode=self._config.execution_mode,
         )
         self._pool_manager.activate_kill_switch()
         self._solver.update_config(
@@ -572,6 +678,7 @@ class VLLMAdapter(FrameworkAdapter):
             kill_switch=False,
             delta_budget=self._config.delta_budget,
             max_bids_per_solve=self._config.max_bids_per_solve,
+            execution_mode=self._config.execution_mode,
         )
         self._pool_manager.enable()
         self._solver.update_config(
@@ -607,46 +714,22 @@ class VLLMAdapter(FrameworkAdapter):
         self._metrics.record_decode_step(request_id)
 
 
-class AdapterMetrics:
-    """vLLM adapter 运行指标。"""
+class AdapterMetrics(BaseAdapterMetrics):
+    """vLLM adapter 运行指标。
+
+    继承 ``BaseAdapterMetrics`` 的 6 个跨框架共同字段，
+    额外提供 vLLM 特有的 ``preemptions_avoided``。
+    """
 
     def __init__(self) -> None:
-        self.total_compressions: int = 0
-        self.total_tokens_freed: int = 0
-        self.total_pressure_events: int = 0
-        self.total_requests_completed: int = 0
-        self.total_decode_steps: int = 0
-        self.kill_switch_activations: int = 0
+        super().__init__()
         self.preemptions_avoided: int = 0
-
-    def record_compression(self, request_id: str, tokens_freed: int) -> None:
-        if tokens_freed > 0:
-            self.total_compressions += 1
-            self.total_tokens_freed += tokens_freed
-
-    def record_pressure_event(self) -> None:
-        self.total_pressure_events += 1
-
-    def record_request_complete(self, request_id: str) -> None:
-        self.total_requests_completed += 1
-
-    def record_decode_step(self, request_id: str) -> None:
-        self.total_decode_steps += 1
-
-    def record_kill_switch(self) -> None:
-        self.kill_switch_activations += 1
 
     def record_preemption_avoided(self) -> None:
         self.preemptions_avoided += 1
 
     def as_dict(self) -> dict[str, int]:
-        """返回所有指标的字典形式。"""
-        return {
-            "total_compressions": self.total_compressions,
-            "total_tokens_freed": self.total_tokens_freed,
-            "total_pressure_events": self.total_pressure_events,
-            "total_requests_completed": self.total_requests_completed,
-            "total_decode_steps": self.total_decode_steps,
-            "kill_switch_activations": self.kill_switch_activations,
-            "preemptions_avoided": self.preemptions_avoided,
-        }
+        """返回所有指标的字典形式（含 vLLM 特有字段）。"""
+        d = super().as_dict()
+        d["preemptions_avoided"] = self.preemptions_avoided
+        return d

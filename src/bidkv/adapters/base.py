@@ -4,7 +4,7 @@
 1. **KV stats 获取**：``get_kv_stats() → (used, max)``
 2. **Pressure interception**：在框架原生 preemption / eviction **之前**获得压缩尝试机会
 3. **Compression 执行**：``execute_compression()`` 委托框架原生 KV 操作
-4. **Scoring 回调**：decode step 后更新 H2OScoring
+4. **Scoring 回调**：decode step 后更新评分策略
 5. **Lifecycle 管理**：``on_request_complete()`` 清理 bid
 """
 
@@ -78,3 +78,47 @@ class FrameworkAdapter(ABC):
     @abstractmethod
     def on_request_complete(self, request_id: str) -> None:
         """请求完成时清理 bid 和内部状态。"""
+
+
+class BaseAdapterMetrics:
+    """跨框架 adapter 运行指标基类。
+
+    提供 6 个所有框架共同的 metric 字段及 record 方法。
+    框架特有指标（如 vLLM 的 ``preemptions_avoided``）由子类扩展。
+    """
+
+    def __init__(self) -> None:
+        self.total_compressions: int = 0
+        self.total_tokens_freed: int = 0
+        self.total_pressure_events: int = 0
+        self.total_requests_completed: int = 0
+        self.total_decode_steps: int = 0
+        self.kill_switch_activations: int = 0
+
+    def record_compression(self, request_id: str, tokens_freed: int) -> None:  # noqa: ARG002
+        if tokens_freed > 0:
+            self.total_compressions += 1
+            self.total_tokens_freed += tokens_freed
+
+    def record_pressure_event(self) -> None:
+        self.total_pressure_events += 1
+
+    def record_request_complete(self, request_id: str) -> None:  # noqa: ARG002
+        self.total_requests_completed += 1
+
+    def record_decode_step(self, request_id: str) -> None:  # noqa: ARG002
+        self.total_decode_steps += 1
+
+    def record_kill_switch(self) -> None:
+        self.kill_switch_activations += 1
+
+    def as_dict(self) -> dict[str, int]:
+        """返回所有指标的字典形式。"""
+        return {
+            "total_compressions": self.total_compressions,
+            "total_tokens_freed": self.total_tokens_freed,
+            "total_pressure_events": self.total_pressure_events,
+            "total_requests_completed": self.total_requests_completed,
+            "total_decode_steps": self.total_decode_steps,
+            "kill_switch_activations": self.kill_switch_activations,
+        }

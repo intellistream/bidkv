@@ -12,7 +12,8 @@ import random
 from collections.abc import Sequence
 from typing import Any
 
-from bidkv.protocol.bid import CompressionBid, make_bid_id
+from bidkv.protocol.bid import CompressionBid
+from bidkv.scoring.bid_builder import build_bids
 
 
 class RandomScoring:
@@ -74,34 +75,16 @@ class RandomScoring:
             return []
 
         scores = self.score(token_ids, **context)
-        bids = []
 
-        for level_idx, level in enumerate(compression_levels):
-            tokens_to_remove = max(1, int(n * level))
-            tokens_freed = min(tokens_to_remove, n - 1)
-            if tokens_freed <= 0:
-                continue
-
-            indexed_scores = sorted(enumerate(scores), key=lambda x: x[1])
-            removed_scores = [s for _, s in indexed_scores[:tokens_freed]]
-
-            avg_removed_importance = sum(removed_scores) / len(removed_scores)
-            quality_delta = min(1.0, avg_removed_importance)
-
-            bid = CompressionBid(
-                bid_id=make_bid_id(request_id, level_idx),
-                request_id=request_id,
-                algorithm_id=self._algorithm_id,
-                tokens_freed=tokens_freed,
-                quality_delta=quality_delta,
-                compress_latency_ms=0.1 * tokens_freed,
-                confidence=0.0,  # 随机评分完全无置信
-                metadata={
-                    "compression_level": level,
-                    "seed": self._seed,
-                    "scoring_method": "random",
-                },
-            )
-            bids.append(bid)
-
-        return bids
+        return build_bids(
+            request_id=request_id,
+            token_ids=token_ids,
+            scores=scores,
+            compression_levels=compression_levels,
+            algorithm_id=self._algorithm_id,
+            confidence_fn=lambda: 0.0,
+            extra_metadata={
+                "seed": self._seed,
+                "scoring_method": "random",
+            },
+        )

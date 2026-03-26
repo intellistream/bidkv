@@ -4,7 +4,172 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **Oracle-DP 策略完整移除**:
+  - 删除 `src/bidkv/baselines/oracle_dp.py` 及所有 import/export/registry 注册
+  - 从 vLLM 和 SGLang 实验配置中移除 oracle-dp 策略
+  - 从 `analysis.py` 中删除 `compute_oracle_gap()` 和 `_plot_oracle_gap()` 函数
+  - 从 `metrics.py` 中移除 `oracle_gap` 字段
+  - 从论文 `paper/bidkv_sc2026.tex` 中移除所有 Oracle-DP 引用（28 处）
+  - 从 `paper/tables/` 中移除 Oracle-DP 表格行
+  - 更新所有文档：baseline-specs、experiment_protocol、sglang-portability-slice 等
+  - vLLM: 8 策略 → 7 策略 (126 runs)；SGLang: 4 策略 → 3 策略 (54 runs)
+  - 删除 DC-2 方向一致性检查（Oracle-DP ≥ BidKV）
+  - 468 tests passing, ruff clean
+
+### Changed
+
+- **ScoringStrategy score-only 契约（二次修复）**:
+  - `ScoringStrategy` Protocol 仅保留 `score()` 方法，移除 `generate_bids` 要求
+  - 主管线统一为 `scorer.score() → build_bids() → pool → solve`，适用于 BidKVStrategy、VLLMAdapter、SGLangAdapter
+  - 全部 H2O 硬编码注释更新为 scorer-agnostic 描述
+
+### Fixed
+
+- 修复 11 个 ruff lint 错误（SIM105, UP031, F401×5, B905×3, E501）
+
 ### Added
+
+- **统一 score 语义 + 统一 bids 生成**:
+  - 新增 `scoring/bid_builder.py` — `build_bids()` 统一将 token-level scores 转换为 CompressionBid
+  - 所有 4 个 scorer（H2O, Attention, Random, Uniform）的 `generate_bids()` 委托 `build_bids()`
+  - BidKVStrategy 构造器接受 `ScoringStrategy`（而非 `H2OScoring`），支持 scorer 注入
+  - `build_bids` 导出至 `bidkv.scoring` 和 `bidkv` 顶层命名空间
+  - 新增 `TestBuildBids`（7 用例）和 `TestBidKVStrategyScorerAgnostic`（5 用例）
+
+- **Mode B v3: Truncated Recompute** (#054):
+  - `truncation_hook.py` — monkeypatch `truncate_request_tail()` onto vLLM KVCacheManager（保留为底层工具）
+  - `_execute_tail_truncation()` v3 语义：截断 output tokens → native preempt（避免 InputBatch 块表失同步）
+  - v2 CUDA crash 根因：直接 block truncation 导致 GPUModelRunner InputBatch 引用已释放 block → device-side assert
+  - v3 解决方案：不直接操作 blocks，先截断 `_output_token_ids`/`_all_token_ids`，再通过 `_preempt_request()` 安全释放
+  - 净效果 vs Mode A：相同即时 KV 回收 + 更低 recompute cost（更短序列）+ 永久 KV 占用降低
+  - `plugin.py` 支持 `BIDKV_EXECUTION_MODE` 环境变量
+  - `config.py` / `runner.py` 新增 `--execution-mode` CLI 参数 (recompute_fallback | tail_truncation)
+  - 20+ 新测试覆盖 Mode B 路径（466 tests total）
+
+### Fixed
+
+- **vLLM Mode A EngineCore crash** — `_execute_recompute_fallback()` 从 `abort_requests()`
+  迁移到 `_preempt_request()` API（vLLM v1 不提供 `abort_requests`）:
+  - 使用 `scheduler._preempt_request(request, timestamp)` 替代不存在的 `abort_requests()`
+  - 从 `scheduler.running` 列表移除请求后调用 preempt
+  - 清理 `prev_step_scheduled_req_ids` 防止 `_make_cached_request_data` 断言失败
+  - 验证结果：BidKV 1000/1000 成功（修复前 85/1000），2222 次压缩，6.27M tokens 释放
+
+### Added
+
+- **断点续跑 (resume) 功能** (#053):
+  - vLLM / SGLang runner 新增 `--resume` CLI 标志
+  - 启用后自动跳过已存在结果文件的 runs，防止重启导致数据丢失
+  - `VLLMExperimentRunner` / `SGLangExperimentRunner` 构造器新增 `resume: bool` 参数
+  - `parse_args()` 返回 `tuple[ExperimentConfig, bool]`
+
+- **Issue #053 全量执行脚本** `scripts/run_issue053.sh`:
+  - 7 步自动化流程：环境验证→P1→P2→合并→SGLang→分析→验收
+  - 支持 `--resume` 断点续跑模式
+
+- **全量实验 + 分析管线** (#053):
+  - vLLM 分析 CLI：`python -m bidkv.experiments.vllm.analysis --results-dir --output-dir`
+  - SGLang 分析 CLI：`python -m bidkv.experiments.sglang.analysis --sglang-results-dir --output-dir`
+  - 格式桥接函数 `_load_collector_results_as_report()`：collector RunResult JSON → ExperimentReport
+  - Figure 6 budget sensitivity（RULE FIG6-DEFAULT）：surrogate budget sensitivity 计算 + PDF 绘制
+  - Figure 7 cross-framework portability：跨框架 SLO attainment 并排柱状图 + DC 标注
+  - `run_sglang_analysis()` 一键分析：Table 2 + DC 检查 + Figure 7
+  - `scripts/run_issue053_pipeline.sh` 自动化 pipeline（P2→merge→SGLang→analysis）
+
+- **Pilot Calibration + Trace/Rate 冻结** (#055):
+  - 分析 90 组已有 pilot 数据（formal 72 + pilot_v3 12 + pilot_v3_mixed_high 6），确认无需额外 pilot（Situation A）
+  - 冻结 per-workload request rates：mixed `(2.0, 3.8, 5.7)`, long_context `(0.35, 0.5, 0.7)`
+  - 生成 seed=42 formal traces（6 文件 + manifest.json），SHA-256 验证通过
+  - 创建 `results/pilot_055/calibration_report.md` 完整校准报告
+
+- **Per-workload rate 架构**：
+  - 新增 `WORKLOAD_REQUEST_RATES` 冻结字典（vLLM + SGLang config）
+  - `ExperimentConfig` / `SGLangExperimentConfig` 新增 `workload_rates` 字段
+  - `get_rates_for_workload(workload)` 方法替代全局 `request_rates`
+  - `total_runs` 属性按 workload 独立计算 rate 数
+  - runner.py CLI 新增 `--mixed-rates` / `--long-rates` 参数覆盖
+  - `freeze_traces.py` 支持 `--use-frozen-rates` 从 config 读取冻结 rates
+
+- **SGLang Smoke Test 完成** (#052): 4 策略 × 1 workload × 1 rate × 1 run = 4 runs
+  - sglang_default / slack_aware / bidkv / oracle_dp 全部通过，零 crash
+  - TTFT p50 ~85ms, TPOT p50 ~32ms, SLO attainment 100%（成功请求）
+  - BidKV hook 注入（serve_entry.py + BIDKV_STRATEGY）验证通过
+  - 结果保存至 `results/sglang_smoke_mode_a/`
+  - 方向一致性初步通过（timeout-dominated regime，策略未分化）
+
+### Changed
+
+- **SGLang Adapter 策略路由** (#051 补丁): SGLangAdapter 新增 `experiment_strategy` /
+  `experiment_strategy_name` 参数，支持 baseline 策略路由
+  - `try_compress()` 根据策略名路由到 `_try_compress_baseline()` 或 BidKV pipeline
+  - `serve_entry.py` 使用 `BaselineRegistry` 获取策略实例并传给 adapter
+  - 确保 4 个 SGLang 策略产生不同的压缩行为
+
+- **SGLang 策略列表更新至 v2.3 冻结版本** (#051):
+  - 4 策略: sglang_default / slack_aware / bidkv / oracle_dp
+  - 替换旧策略 global_nobid → slack_aware, uniform → oracle_dp
+  - 更新 `STRATEGY_BASELINE_MAP` 映射
+  - runner.py CLI `--strategies` 默认值同步更新
+  - `strategies.py`: 策略配置从 v7 (global_nobid, uniform) 更新至 v2.3 (slack_aware, oracle_dp)
+  - `analysis.py`: 方向一致性检查更新为 DC-1a/DC-1b/DC-2（v2.3 冻结定义）
+
+### Fixed
+
+- **vLLM/SGLang runner pipe 死锁**：`subprocess.Popen(stdout=PIPE)` 的 64KB 管道缓冲区被
+  vLLM server 日志输出灌满后导致 server 进程阻塞，请求无法处理。改为重定向至日志文件
+  (`output_dir/server_{strategy}.log`)。
+- **vLLM runner server 状态累积**：同一 (strategy, workload, rate) 组内的 3 次 repeat run
+  共享一个 server 实例，r0 之后 KV cache 耗尽导致 r1/r2 全部 timeout。改为每个 run 独立
+  重启 server（start→warmup→run→stop→cooldown 3s）。
+- **SGLang runner server 生命周期**：同类问题，server 原本每个 strategy 仅启动一次，
+  所有 workload/rate/run 共享。同样改为每个 run 独立重启。
+- **serve_entry.py**: `BidKVConfig(active=True)` → `BidKVConfig(enabled=True)`（`BidKVConfig` 无 `active` 字段）
+
+### Added
+
+- **Fairness audit logging** (#051): `write_audit_entry()` 函数
+  - 输出 candidate_count + candidate_list_hash（确定性排序后 MD5）
+  - JSONL 格式，追加写入 `results/sglang_*/audit_*.jsonl`
+  - 用于验证 within-platform candidate-universe consistency
+  - 3 个单元测试覆盖（文件创建、追加、hash 确定性）
+
+### Changed
+
+- **vLLM Mode A — Recompute Fallback Executor** (#049): 将 vLLM adapter 从危险的
+  `_free_tail_blocks()` 切换到安全的 Mode A (Recompute Fallback) 执行模式
+  - `BidKVConfig` 新增 `execution_mode` 字段（默认 `"recompute_fallback"`）
+  - `execute_compression()` 根据 `execution_mode` 路由到不同执行策略
+  - 新增 `_execute_recompute_fallback()`：仅使用 vLLM native `scheduler.abort_requests()` API
+  - `_free_tail_blocks()` 标记废弃，调用时抛出 `RuntimeError`
+  - 零 coordinator/block_pool 直接操作，消除 CUDA 内存损坏风险
+  - 新增 13 个测试覆盖 recompute fallback、deprecation、execution_mode routing
+
+### Added
+
+- **SGLang Portability Experiment — Real HTTP Runner** (#048): SGLang 可移植性验证实验基础设施
+  - `bidkv.experiments.sglang.config`: `SGLangExperimentConfig` / `SGLangServerConfig` / `SLOConfig`
+    - SLO 值与 Issue-047 完全一致: ttft_target_ms=2000.0, tpot_target_ms=100.0
+    - 4 策略: sglang_default / bidkv / global_nobid / uniform
+    - 2 工作负载: mixed / long_context（正式名称与 Issue-047 对齐）
+    - 3 请求率: 1.0, 2.0, 4.0 req/s
+  - `bidkv.experiments.sglang.server`: `SGLangServer` 生命周期管理
+    - sglang_default: 原生 SGLang server
+    - 其他策略: 通过 BIDKV_STRATEGY 环境变量 + serve_entry.py 注入 adapter
+    - SIGTERM → wait 15s → SIGKILL 优雅停止
+  - `bidkv.experiments.sglang.serve_entry`: BidKV 注入入口点
+    - Monkey-patch `Scheduler.__init__` 在 server 进程内注入 hooks
+  - `bidkv.experiments.sglang.collector`: `RequestResult` / `RunResult` / `save_run_result`
+    - P95/P99 TTFT、TPOT（computed property）、SLO attainment、completion rate
+  - `bidkv.experiments.sglang.runner`: `SGLangExperimentRunner` 完全重写
+    - **替换旧 simulation runner**: 不再使用公式估算，改为真实 HTTP Poisson 开环
+    - Poisson 开环到达: 按 arrival_time_ms 调度请求，无 max_inflight 限制
+    - /v1/chat/completions (streaming=True) SSE 首 chunk 精确 TTFT 采集
+    - Consecutive timeout abort 机制
+    - 复用 Issue-047 frozen traces (experiments/vllm/traces/)
+    - CLI 入口: `python -m bidkv.experiments.sglang.runner`
+  - 33 个单元测试全部通过
 
 - **vLLM Adapter** (#044): BidKV 在 vLLM v1 架构上的完整适配器
   - Architecture Decision: vLLM v1 (0.17+) 移除了 `BlockSpaceManager` 和 `--block-manager-class`，

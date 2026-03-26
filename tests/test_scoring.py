@@ -623,3 +623,161 @@ class TestGenerateBidsCommon:
         # 对于 1 个 token，tokens_freed = min(int(1*0.5)=0... 实际 max(1, 0) = 1，
         # 但 min(1, 1-1) = 0，所以 skip
         assert bids == []
+
+
+# ===========================================================================
+# build_bids 统一生成器测试
+# ===========================================================================
+
+
+class TestBuildBids:
+    """测试 build_bids() 统一 bids 生成逻辑。"""
+
+    def test_basic(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        scores = [0.1, 0.9, 0.5, 0.3, 0.7]
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=[10, 20, 30, 40, 50],
+            scores=scores,
+            compression_levels=[0.4],
+            algorithm_id="test",
+        )
+        assert len(bids) == 1
+        bid = bids[0]
+        assert bid.request_id == "req-bb"
+        assert bid.algorithm_id == "test"
+        assert bid.tokens_freed == 2  # int(5 * 0.4) = 2
+        assert bid.bid_id == "req-bb:bid:0"
+        # 被移除的应是分数最低的 2 个：0.1, 0.3 → δ = 0.2
+        assert abs(bid.quality_delta - 0.2) < 1e-9
+
+    def test_empty_tokens(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=[],
+            scores=[],
+            compression_levels=[0.5],
+            algorithm_id="test",
+        )
+        assert bids == []
+
+    def test_scores_length_mismatch(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        with pytest.raises(ValueError, match="scores length"):
+            build_bids(
+                request_id="req-bb",
+                token_ids=[1, 2, 3],
+                scores=[0.5, 0.5],
+                compression_levels=[0.3],
+                algorithm_id="test",
+            )
+
+    def test_multiple_levels(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=list(range(10)),
+            scores=[0.5] * 10,
+            compression_levels=[0.2, 0.5, 0.8],
+            algorithm_id="test",
+        )
+        assert len(bids) == 3
+        freed = [b.tokens_freed for b in bids]
+        assert freed[0] <= freed[1] <= freed[2]
+
+    def test_confidence_fn(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=[1, 2, 3, 4, 5],
+            scores=[0.2, 0.4, 0.6, 0.8, 1.0],
+            compression_levels=[0.4],
+            algorithm_id="test",
+            confidence_fn=lambda: 0.85,
+        )
+        assert bids[0].confidence == 0.85
+
+    def test_extra_metadata(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=[1, 2, 3, 4, 5],
+            scores=[0.1, 0.2, 0.3, 0.4, 0.5],
+            compression_levels=[0.4],
+            algorithm_id="test",
+            extra_metadata={"custom_key": "custom_value"},
+        )
+        assert bids[0].metadata["custom_key"] == "custom_value"
+        assert "compression_level" in bids[0].metadata
+
+    def test_default_confidence(self) -> None:
+        from bidkv.scoring.bid_builder import build_bids
+
+        bids = build_bids(
+            request_id="req-bb",
+            token_ids=[1, 2, 3, 4, 5],
+            scores=[0.5] * 5,
+            compression_levels=[0.4],
+            algorithm_id="test",
+        )
+        assert bids[0].confidence == 0.5
+
+
+# ===========================================================================
+# BidKVStrategy scorer-agnostic 测试
+# ===========================================================================
+
+
+class TestBidKVStrategyScorerAgnostic:
+    """测试 BidKVStrategy 接受任意 ScoringStrategy 实现。"""
+
+    def test_default_is_h2o(self) -> None:
+        from bidkv.baselines.bidkv_strategy import BidKVStrategy
+
+        strategy = BidKVStrategy()
+        assert isinstance(strategy.scoring, H2OScoring)
+
+    def test_inject_uniform_scorer(self) -> None:
+        from bidkv.baselines.bidkv_strategy import BidKVStrategy
+
+        strategy = BidKVStrategy(scoring=UniformScoring())
+        assert isinstance(strategy.scoring, UniformScoring)
+
+    def test_inject_random_scorer(self) -> None:
+        from bidkv.baselines.bidkv_strategy import BidKVStrategy
+
+        strategy = BidKVStrategy(scoring=RandomScoring(seed=42))
+        assert isinstance(strategy.scoring, RandomScoring)
+
+    def test_inject_attention_scorer(self) -> None:
+        from bidkv.baselines.bidkv_strategy import BidKVStrategy
+
+        strategy = BidKVStrategy(scoring=AttentionWeightScoring())
+        assert isinstance(strategy.scoring, AttentionWeightScoring)
+
+    def test_select_victims_with_uniform(self) -> None:
+        """使用 UniformScoring 注入后 select_victims 仍正常工作。"""
+        from bidkv.baselines.base import RequestState
+        from bidkv.baselines.bidkv_strategy import BidKVStrategy
+
+        strategy = BidKVStrategy(scoring=UniformScoring(), delta_budget=0.9)
+        candidates = [
+            RequestState(
+                request_id="req-1",
+                current_tokens=50,
+                token_ids=tuple(range(50)),
+                priority=1.0,
+            ),
+        ]
+        actions = strategy.select_victims(candidates, needed_tokens=10)
+        # 应该能产生 action（delta_budget 足够宽松）
+        assert len(actions) >= 1
+        assert actions[0].request_id == "req-1"

@@ -1,0 +1,36 @@
+% fig2_algorithm.tex — Algorithm 1: GreedyBidSolver
+% Usage: \input{figures/fig2_algorithm}
+
+\begin{figure}[t]
+\begin{algorithm}[H]
+\caption{Utility-Ratio Greedy Knapsack Solver}\label{alg:greedy}
+\begin{algorithmic}[1]
+\Require Bid pool $\mathcal{P} = \{b_1, b_2, \ldots, b_B\}$; tokens needed $N$; quality budget $\Delta_{\max}$
+\Ensure Acceptance set $\mathcal{A}$
+\State $\mathcal{A} \gets \emptyset$;\; $\Sigma_r \gets 0$;\; $\Sigma_\delta \gets 0$;\;
+       $\mathcal{R} \gets \emptyset$ \Comment{accepted request IDs}
+\ForAll{$b \in \mathcal{P}$}
+  \State $U(b) \gets \dfrac{b.r}{b.\delta + \varepsilon}$
+  \Comment{utility ratio, $\varepsilon = 10^{-3}$}
+\EndFor
+\State Sort $\mathcal{P}$ by $U(b)$ in decreasing order
+\ForAll{$b \in \mathcal{P}$ \textbf{in sorted order}}
+  \If{$\Sigma_r \geq N$}
+    \State \textbf{break} \Comment{token demand satisfied}
+  \EndIf
+  \If{$b.\textrm{request\_id} \in \mathcal{R}$}
+    \State \textbf{continue} \Comment{at most one bid per request}
+  \EndIf
+  \If{$\Sigma_\delta + b.\delta > \Delta_{\max}$}
+    \State \textbf{continue} \Comment{quality budget constraint}
+  \EndIf
+  \State $\mathcal{A} \gets \mathcal{A} \cup \{b\}$
+  \State $\Sigma_r \gets \Sigma_r + b.r$;\;
+         $\Sigma_\delta \gets \Sigma_\delta + b.\delta$
+  \State $\mathcal{R} \gets \mathcal{R} \cup \{b.\textrm{request\_id}\}$
+\EndFor
+\State \Return $\mathcal{A}$, $\Sigma_r$, $\Sigma_\delta$
+\end{algorithmic}
+\end{algorithm}
+\vspace{-0.4em}
+\end{figure}

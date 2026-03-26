@@ -101,13 +101,13 @@ class RunResult:
     Attributes
     ----------
     run_label:
-        运行标识符（strategy__workload__cN__rM）。
+        运行标识符（strategy__workload__rateX__rM）。
     strategy:
         策略名称。
     workload:
         工作负载名称。
-    concurrency:
-        并发度。
+    request_rate:
+        请求到达速率 (req/s)。
     run_index:
         运行序号。
     request_results:
@@ -127,7 +127,7 @@ class RunResult:
     run_label: str
     strategy: str
     workload: str
-    concurrency: int
+    request_rate: float
     run_index: int
     request_results: list[RequestResult] = field(default_factory=list)
     candidate_snapshots: list[CandidateSnapshot] = field(default_factory=list)
@@ -154,32 +154,89 @@ class RunResult:
             return 0.0
         return len(self.successful_requests) / self.duration_s
 
+    def _percentile(self, values: list[float], pct: float) -> float:
+        """计算百分位数。"""
+        if not values:
+            return 0.0
+        s = sorted(values)
+        idx = max(0, int(len(s) * pct) - 1)
+        return s[idx]
+
+    def _ttft_values(self) -> list[float]:
+        return [r.ttft_ms for r in self.successful_requests if r.ttft_ms > 0]
+
+    def _tpot_values(self) -> list[float]:
+        return [r.tpot_ms for r in self.successful_requests if r.tpot_ms > 0]
+
+    def _e2e_latency_values(self) -> list[float]:
+        return [r.total_latency_ms for r in self.successful_requests if r.total_latency_ms > 0]
+
+    def compute_p50_ttft_ms(self) -> float:
+        """计算 P50 TTFT（毫秒）。"""
+        return self._percentile(self._ttft_values(), 0.50)
+
     def compute_p99_ttft_ms(self) -> float:
         """计算 P99 TTFT（毫秒）。"""
-        ttfts = sorted(r.ttft_ms for r in self.successful_requests if r.ttft_ms > 0)
-        if not ttfts:
-            return 0.0
-        idx = max(0, int(len(ttfts) * 0.99) - 1)
-        return ttfts[idx]
+        return self._percentile(self._ttft_values(), 0.99)
 
-    def compute_slo_violation_rate(self, ttft_target_ms: float) -> float:
-        """计算 SLO violation rate。
+    def compute_p50_tpot_ms(self) -> float:
+        """计算 P50 TPOT（毫秒）。"""
+        return self._percentile(self._tpot_values(), 0.50)
+
+    def compute_p99_tpot_ms(self) -> float:
+        """计算 P99 TPOT（毫秒）。"""
+        return self._percentile(self._tpot_values(), 0.99)
+
+    def compute_p50_e2e_latency_ms(self) -> float:
+        """计算 P50 端到端延迟（毫秒）。"""
+        return self._percentile(self._e2e_latency_values(), 0.50)
+
+    def compute_p99_e2e_latency_ms(self) -> float:
+        """计算 P99 端到端延迟（毫秒）。"""
+        return self._percentile(self._e2e_latency_values(), 0.99)
+
+    def compute_normalized_latency_ms(self) -> float:
+        """计算 Normalized Latency (ms/token) = mean(E2E) / mean(output_tokens)。"""
+        reqs = [
+            r
+            for r in self.successful_requests
+            if r.total_latency_ms > 0 and r.completion_tokens > 0
+        ]
+        if not reqs:
+            return 0.0
+        mean_e2e = sum(r.total_latency_ms for r in reqs) / len(reqs)
+        mean_tokens = sum(r.completion_tokens for r in reqs) / len(reqs)
+        return mean_e2e / mean_tokens if mean_tokens > 0 else 0.0
+
+    def compute_slo_attainment_rate(
+        self, ttft_target_ms: float, tpot_target_ms: float = 0.0
+    ) -> float:
+        """计算 SLO attainment rate。
+
+        SLO 定义：TTFT < ttft_target AND TPOT < tpot_target（当 tpot_target > 0 时）。
 
         Parameters
         ----------
         ttft_target_ms:
             TTFT SLO 阈值（ms）。
+        tpot_target_ms:
+            TPOT SLO 阈值（ms）。0 表示不检查 TPOT。
 
         Returns
         -------
         float
-            违反 SLO 的请求比例 [0, 1]。
+            满足 SLO 的请求占成功请求的比例 [0, 1]（越高越好）。
         """
         successful = self.successful_requests
         if not successful:
             return 0.0
-        violations = sum(1 for r in successful if r.ttft_ms > ttft_target_ms)
-        return violations / len(successful)
+        check_tpot = tpot_target_ms > 0
+        attained = sum(
+            1
+            for r in successful
+            if r.ttft_ms <= ttft_target_ms and (not check_tpot or r.tpot_ms <= tpot_target_ms)
+        )
+        return attained / len(successful)
 
 
 def save_run_result(result: RunResult, output_dir: Path) -> Path:
@@ -205,7 +262,7 @@ def save_run_result(result: RunResult, output_dir: Path) -> Path:
         "run_label": result.run_label,
         "strategy": result.strategy,
         "workload": result.workload,
-        "concurrency": result.concurrency,
+        "request_rate": result.request_rate,
         "run_index": result.run_index,
         "start_time": result.start_time,
         "end_time": result.end_time,
@@ -217,7 +274,13 @@ def save_run_result(result: RunResult, output_dir: Path) -> Path:
             "successful_requests": len(result.successful_requests),
             "failed_requests": len(result.failed_requests),
             "throughput_rps": result.compute_throughput_rps(),
-            "p99_ttft_ms": result.compute_p99_ttft_ms(),
+            "ttft_ms_p50": result.compute_p50_ttft_ms(),
+            "ttft_ms_p99": result.compute_p99_ttft_ms(),
+            "tpot_ms_p50": result.compute_p50_tpot_ms(),
+            "tpot_ms_p99": result.compute_p99_tpot_ms(),
+            "e2e_latency_ms_p50": result.compute_p50_e2e_latency_ms(),
+            "e2e_latency_ms_p99": result.compute_p99_e2e_latency_ms(),
+            "normalized_latency_ms_per_token": result.compute_normalized_latency_ms(),
         },
         "request_results": [asdict(r) for r in result.request_results],
         "candidate_snapshots": [asdict(s) for s in result.candidate_snapshots],
@@ -253,7 +316,7 @@ def load_run_result(path: Path) -> RunResult:
         run_label=data["run_label"],
         strategy=data["strategy"],
         workload=data["workload"],
-        concurrency=data["concurrency"],
+        request_rate=data.get("request_rate", data.get("concurrency", 0.0)),
         run_index=data["run_index"],
         request_results=request_results,
         candidate_snapshots=candidate_snapshots,

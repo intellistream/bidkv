@@ -1,11 +1,9 @@
 """Result analysis and paper figure generation for vLLM experiments.
 
-生成论文 §6 需要的 6 张 Figure + 2 张 Table 数据：
+生成论文 §6 需要的 Figure + Table 数据：
 
-Figure 1 [Cat A]: SLO Violation Rate vs KV 压力
+Figure 1 [Cat A]: SLO Attainment Rate vs KV 压力
 Figure 2 [Cat A]: P99 TTFT vs 吞吐量（Pareto 前沿）
-Figure 3a/3b [Cat C]: 质量退化对比
-Figure 4 [Cat B]: Oracle Gap 可视化
 Figure 5 [Cat A]: 覆盖率与降级频率
 Figure 6 [Cat B]: Δ budget 敏感性
 
@@ -22,8 +20,6 @@ from pathlib import Path
 
 from bidkv.experiments.vllm.collector import RunResult, load_all_run_results
 from bidkv.experiments.vllm.config import (
-    STRATEGY_BIDKV,
-    STRATEGY_ORACLE_DP,
     SLOConfig,
 )
 
@@ -32,21 +28,37 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StrategyAggregation:
-    """单个策略在特定 (workload, concurrency) 下的聚合指标。
+    """单个策略在特定 (workload, request_rate) 下的聚合指标。
 
-    多次运行的均值和置信区间。
+    多次运行的均值和置信区间。业界标准指标体系
+    （参照 vLLM SOSP'23, DistServe OSDI'24, SGLang, SARATHI-Serve）。
     """
 
     strategy: str
     workload: str
-    concurrency: int
+    request_rate: float
     runs: int = 0
+    # -- 业界标准指标 --
     throughput_rps_mean: float = 0.0
     throughput_rps_ci95: float = 0.0
+    p50_ttft_ms_mean: float = 0.0
+    p50_ttft_ms_ci95: float = 0.0
     p99_ttft_ms_mean: float = 0.0
     p99_ttft_ms_ci95: float = 0.0
-    slo_violation_rate_mean: float = 0.0
-    slo_violation_rate_ci95: float = 0.0
+    p50_tpot_ms_mean: float = 0.0
+    p50_tpot_ms_ci95: float = 0.0
+    p99_tpot_ms_mean: float = 0.0
+    p99_tpot_ms_ci95: float = 0.0
+    p50_e2e_latency_ms_mean: float = 0.0
+    p50_e2e_latency_ms_ci95: float = 0.0
+    p99_e2e_latency_ms_mean: float = 0.0
+    p99_e2e_latency_ms_ci95: float = 0.0
+    normalized_latency_mean: float = 0.0
+    normalized_latency_ci95: float = 0.0
+    # -- SLO attainment（可选辅助指标）--
+    slo_attainment_rate_mean: float = 0.0
+    slo_attainment_rate_ci95: float = 0.0
+    # -- 压缩辅助指标 --
     compression_coverage_mean: float = 0.0
     total_compressions_mean: float = 0.0
     total_tokens_freed_mean: float = 0.0
@@ -107,17 +119,25 @@ def aggregate_results(
     """
     slo = slo_config or SLOConfig()
 
-    # 按 (strategy, workload, concurrency) 分组
-    groups: dict[tuple[str, str, int], list[RunResult]] = {}
+    # 按 (strategy, workload, request_rate) 分组
+    groups: dict[tuple[str, str, float], list[RunResult]] = {}
     for r in results:
-        key = (r.strategy, r.workload, r.concurrency)
+        key = (r.strategy, r.workload, r.request_rate)
         groups.setdefault(key, []).append(r)
 
     aggregations: list[StrategyAggregation] = []
-    for (strategy, workload, concurrency), group in sorted(groups.items()):
+    for (strategy, workload, request_rate), group in sorted(groups.items()):
         throughputs = [r.compute_throughput_rps() for r in group]
+        p50_ttfts = [r.compute_p50_ttft_ms() for r in group]
         p99_ttfts = [r.compute_p99_ttft_ms() for r in group]
-        slo_violations = [r.compute_slo_violation_rate(slo.ttft_target_ms) for r in group]
+        p50_tpots = [r.compute_p50_tpot_ms() for r in group]
+        p99_tpots = [r.compute_p99_tpot_ms() for r in group]
+        p50_e2es = [r.compute_p50_e2e_latency_ms() for r in group]
+        p99_e2es = [r.compute_p99_e2e_latency_ms() for r in group]
+        norm_lats = [r.compute_normalized_latency_ms() for r in group]
+        slo_attainments = [
+            r.compute_slo_attainment_rate(slo.ttft_target_ms, slo.tpot_target_ms) for r in group
+        ]
 
         # adapter metrics
         total_comps = [float(r.adapter_metrics.get("total_compressions", 0)) for r in group]
@@ -125,8 +145,14 @@ def aggregate_results(
         pressure_events = [float(r.adapter_metrics.get("total_pressure_events", 0)) for r in group]
 
         tp_mean, tp_ci = compute_ci95(throughputs)
-        ttft_mean, ttft_ci = compute_ci95(p99_ttfts)
-        slo_mean, slo_ci = compute_ci95(slo_violations)
+        p50_ttft_mean, p50_ttft_ci = compute_ci95(p50_ttfts)
+        p99_ttft_mean, p99_ttft_ci = compute_ci95(p99_ttfts)
+        p50_tpot_mean, p50_tpot_ci = compute_ci95(p50_tpots)
+        p99_tpot_mean, p99_tpot_ci = compute_ci95(p99_tpots)
+        p50_e2e_mean, p50_e2e_ci = compute_ci95(p50_e2es)
+        p99_e2e_mean, p99_e2e_ci = compute_ci95(p99_e2es)
+        norm_lat_mean, norm_lat_ci = compute_ci95(norm_lats)
+        slo_mean, slo_ci = compute_ci95(slo_attainments)
 
         # Compression coverage = requests with compression / total requests
         coverages = []
@@ -146,14 +172,26 @@ def aggregate_results(
             StrategyAggregation(
                 strategy=strategy,
                 workload=workload,
-                concurrency=concurrency,
+                request_rate=request_rate,
                 runs=len(group),
                 throughput_rps_mean=tp_mean,
                 throughput_rps_ci95=tp_ci,
-                p99_ttft_ms_mean=ttft_mean,
-                p99_ttft_ms_ci95=ttft_ci,
-                slo_violation_rate_mean=slo_mean,
-                slo_violation_rate_ci95=slo_ci,
+                p50_ttft_ms_mean=p50_ttft_mean,
+                p50_ttft_ms_ci95=p50_ttft_ci,
+                p99_ttft_ms_mean=p99_ttft_mean,
+                p99_ttft_ms_ci95=p99_ttft_ci,
+                p50_tpot_ms_mean=p50_tpot_mean,
+                p50_tpot_ms_ci95=p50_tpot_ci,
+                p99_tpot_ms_mean=p99_tpot_mean,
+                p99_tpot_ms_ci95=p99_tpot_ci,
+                p50_e2e_latency_ms_mean=p50_e2e_mean,
+                p50_e2e_latency_ms_ci95=p50_e2e_ci,
+                p99_e2e_latency_ms_mean=p99_e2e_mean,
+                p99_e2e_latency_ms_ci95=p99_e2e_ci,
+                normalized_latency_mean=norm_lat_mean,
+                normalized_latency_ci95=norm_lat_ci,
+                slo_attainment_rate_mean=slo_mean,
+                slo_attainment_rate_ci95=slo_ci,
                 compression_coverage_mean=cov_mean,
                 total_compressions_mean=comp_mean,
                 total_tokens_freed_mean=freed_mean,
@@ -164,51 +202,8 @@ def aggregate_results(
     return aggregations
 
 
-def compute_oracle_gap(
-    aggregations: list[StrategyAggregation],
-) -> dict[str, float]:
-    """计算 BidKV 与 Oracle 之间的 gap。
-
-    Oracle Gap = (BidKV_slo_violation - Oracle_slo_violation) / Oracle_slo_violation
-
-    Parameters
-    ----------
-    aggregations:
-        聚合统计。
-
-    Returns
-    -------
-    dict[str, float]
-        {workload__concurrency: oracle_gap}
-    """
-    # 索引 BidKV 和 Oracle 结果
-    bidkv_results: dict[tuple[str, int], StrategyAggregation] = {}
-    oracle_results: dict[tuple[str, int], StrategyAggregation] = {}
-
-    for agg in aggregations:
-        key = (agg.workload, agg.concurrency)
-        if agg.strategy == STRATEGY_BIDKV:
-            bidkv_results[key] = agg
-        elif agg.strategy == STRATEGY_ORACLE_DP:
-            oracle_results[key] = agg
-
-    gaps: dict[str, float] = {}
-    for key, bidkv_agg in bidkv_results.items():
-        oracle_agg = oracle_results.get(key)
-        if oracle_agg is None:
-            continue
-        oracle_slo = oracle_agg.slo_violation_rate_mean
-        bidkv_slo = bidkv_agg.slo_violation_rate_mean
-        gap = (bidkv_slo - oracle_slo) / oracle_slo if oracle_slo > 0 else bidkv_slo
-        label = f"{key[0]}__c{key[1]}"
-        gaps[label] = gap
-
-    return gaps
-
-
 def export_summary_json(
     aggregations: list[StrategyAggregation],
-    oracle_gaps: dict[str, float],
     output_dir: Path,
 ) -> Path:
     """导出聚合摘要为 JSON。"""
@@ -220,19 +215,43 @@ def export_summary_json(
             {
                 "strategy": a.strategy,
                 "workload": a.workload,
-                "concurrency": a.concurrency,
+                "request_rate": a.request_rate,
                 "runs": a.runs,
                 "throughput_rps": {
                     "mean": a.throughput_rps_mean,
                     "ci95": a.throughput_rps_ci95,
                 },
-                "p99_ttft_ms": {
+                "ttft_ms_p50": {
+                    "mean": a.p50_ttft_ms_mean,
+                    "ci95": a.p50_ttft_ms_ci95,
+                },
+                "ttft_ms_p99": {
                     "mean": a.p99_ttft_ms_mean,
                     "ci95": a.p99_ttft_ms_ci95,
                 },
-                "slo_violation_rate": {
-                    "mean": a.slo_violation_rate_mean,
-                    "ci95": a.slo_violation_rate_ci95,
+                "tpot_ms_p50": {
+                    "mean": a.p50_tpot_ms_mean,
+                    "ci95": a.p50_tpot_ms_ci95,
+                },
+                "tpot_ms_p99": {
+                    "mean": a.p99_tpot_ms_mean,
+                    "ci95": a.p99_tpot_ms_ci95,
+                },
+                "e2e_latency_ms_p50": {
+                    "mean": a.p50_e2e_latency_ms_mean,
+                    "ci95": a.p50_e2e_latency_ms_ci95,
+                },
+                "e2e_latency_ms_p99": {
+                    "mean": a.p99_e2e_latency_ms_mean,
+                    "ci95": a.p99_e2e_latency_ms_ci95,
+                },
+                "normalized_latency_ms_per_token": {
+                    "mean": a.normalized_latency_mean,
+                    "ci95": a.normalized_latency_ci95,
+                },
+                "slo_attainment_rate": {
+                    "mean": a.slo_attainment_rate_mean,
+                    "ci95": a.slo_attainment_rate_ci95,
                 },
                 "compression_coverage": a.compression_coverage_mean,
                 "total_compressions": a.total_compressions_mean,
@@ -241,7 +260,6 @@ def export_summary_json(
             }
             for a in aggregations
         ],
-        "oracle_gaps": oracle_gaps,
     }
 
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -251,7 +269,6 @@ def export_summary_json(
 
 def generate_figures(
     aggregations: list[StrategyAggregation],
-    oracle_gaps: dict[str, float],
     output_dir: Path,
 ) -> list[Path]:
     """生成论文 Figure PDF 文件。
@@ -262,8 +279,6 @@ def generate_figures(
     ----------
     aggregations:
         聚合统计。
-    oracle_gaps:
-        Oracle gap 数据。
     output_dir:
         图片输出目录。
 
@@ -289,14 +304,11 @@ def generate_figures(
     figures_dir.mkdir(exist_ok=True)
     generated: list[Path] = []
 
-    # Figure 1 [Cat A]: SLO Violation Rate — 按策略分组柱状图
-    generated.extend(_plot_slo_violation_bar(aggregations, figures_dir))
+    # Figure 1 [Cat A]: SLO Attainment Rate — 按策略分组柱状图
+    generated.extend(_plot_slo_attainment_bar(aggregations, figures_dir))
 
     # Figure 2 [Cat A]: P99 TTFT vs Throughput — Pareto 散点图
     generated.extend(_plot_pareto_front(aggregations, figures_dir))
-
-    # Figure 4 [Cat B]: Oracle Gap — 箱线图
-    generated.extend(_plot_oracle_gap(oracle_gaps, figures_dir))
 
     # Figure 5 [Cat A]: Compression coverage
     generated.extend(_plot_compression_coverage(aggregations, figures_dir))
@@ -305,11 +317,11 @@ def generate_figures(
     return generated
 
 
-def _plot_slo_violation_bar(
+def _plot_slo_attainment_bar(
     aggregations: list[StrategyAggregation],
     output_dir: Path,
 ) -> list[Path]:
-    """Figure 1: SLO Violation Rate bar chart."""
+    """Figure 1: SLO Attainment Rate bar chart."""
     import matplotlib.pyplot as plt
 
     paths: list[Path] = []
@@ -321,19 +333,19 @@ def _plot_slo_violation_bar(
         wl_data = [a for a in aggregations if a.workload == workload]
 
         strategies = sorted({a.strategy for a in wl_data})
-        concurrencies = sorted({a.concurrency for a in wl_data})
+        rates = sorted({a.request_rate for a in wl_data})
 
-        x_positions = range(len(concurrencies))
+        x_positions = range(len(rates))
         bar_width = 0.8 / max(1, len(strategies))
 
         for i, strategy in enumerate(strategies):
             means = []
             errors = []
-            for c in concurrencies:
-                match = [a for a in wl_data if a.strategy == strategy and a.concurrency == c]
+            for rate in rates:
+                match = [a for a in wl_data if a.strategy == strategy and a.request_rate == rate]
                 if match:
-                    means.append(match[0].slo_violation_rate_mean * 100)
-                    errors.append(match[0].slo_violation_rate_ci95 * 100)
+                    means.append(match[0].slo_attainment_rate_mean * 100)
+                    errors.append(match[0].slo_attainment_rate_ci95 * 100)
                 else:
                     means.append(0)
                     errors.append(0)
@@ -348,15 +360,15 @@ def _plot_slo_violation_bar(
                 capsize=3,
             )
 
-        ax.set_xlabel("Concurrency")
-        ax.set_ylabel("SLO Violation Rate (%)")
-        ax.set_title(f"[Category A] SLO Violation Rate — {workload}")
+        ax.set_xlabel("Request Rate (req/s)")
+        ax.set_ylabel("SLO Attainment Rate (%)")
+        ax.set_title(f"[Category A] SLO Attainment Rate — {workload}")
         ax.set_xticks([x + bar_width * len(strategies) / 2 for x in x_positions])
-        ax.set_xticklabels([str(c) for c in concurrencies])
+        ax.set_xticklabels([str(r) for r in rates])
         ax.legend(fontsize=8, ncol=2)
         ax.grid(axis="y", alpha=0.3)
 
-        path = output_dir / f"fig1_slo_violation_{workload}.pdf"
+        path = output_dir / f"fig1_slo_attainment_{workload}.pdf"
         fig.savefig(path, bbox_inches="tight", dpi=150)
         plt.close(fig)
         paths.append(path)
@@ -409,35 +421,6 @@ def _plot_pareto_front(
     return paths
 
 
-def _plot_oracle_gap(
-    oracle_gaps: dict[str, float],
-    output_dir: Path,
-) -> list[Path]:
-    """Figure 4: Oracle Gap box plot."""
-    import matplotlib.pyplot as plt
-
-    if not oracle_gaps:
-        return []
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    labels = sorted(oracle_gaps.keys())
-    values = [oracle_gaps[k] * 100 for k in labels]
-
-    ax.bar(range(len(labels)), values, color="steelblue", alpha=0.8)
-    ax.set_xlabel("Workload × Concurrency")
-    ax.set_ylabel("Oracle Gap (%)")
-    ax.set_title("[Category B] BidKV Oracle Gap")
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.grid(axis="y", alpha=0.3)
-
-    path = output_dir / "fig4_oracle_gap.pdf"
-    fig.savefig(path, bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    return [path]
-
-
 def _plot_compression_coverage(
     aggregations: list[StrategyAggregation],
     output_dir: Path,
@@ -458,24 +441,24 @@ def _plot_compression_coverage(
         wl_data = [a for a in compress_strategies if a.workload == workload]
 
         strategies = sorted({a.strategy for a in wl_data})
-        concurrencies = sorted({a.concurrency for a in wl_data})
+        rates = sorted({a.request_rate for a in wl_data})
 
         bar_width = 0.8 / max(1, len(strategies))
-        x_positions = range(len(concurrencies))
+        x_positions = range(len(rates))
 
         for i, strategy in enumerate(strategies):
             coverages = []
-            for c in concurrencies:
-                match = [a for a in wl_data if a.strategy == strategy and a.concurrency == c]
+            for rate in rates:
+                match = [a for a in wl_data if a.strategy == strategy and a.request_rate == rate]
                 coverages.append(match[0].compression_coverage_mean * 100 if match else 0)
             positions = [x + i * bar_width for x in x_positions]
             ax.bar(positions, coverages, bar_width, label=strategy)
 
-        ax.set_xlabel("Concurrency")
+        ax.set_xlabel("Request Rate (req/s)")
         ax.set_ylabel("Compression Coverage (%)")
         ax.set_title(f"[Category A] Compression Coverage — {workload}")
         ax.set_xticks([x + bar_width * len(strategies) / 2 for x in x_positions])
-        ax.set_xticklabels([str(c) for c in concurrencies])
+        ax.set_xticklabels([str(r) for r in rates])
         ax.legend(fontsize=8, ncol=2)
         ax.grid(axis="y", alpha=0.3)
 
@@ -545,13 +528,6 @@ def generate_table1_data(aggregations: list[StrategyAggregation]) -> list[dict[s
             "has_solver": True,
             "design_rationale": "Complete system with user-explicit quality preference",
         },
-        "oracle-dp": {
-            "description": "Offline optimal solution via dynamic programming",
-            "has_scoring": True,
-            "has_bid": True,
-            "has_solver": True,
-            "design_rationale": "Upper bound reference (not online-feasible)",
-        },
     }
 
     table_rows: list[dict[str, object]] = []
@@ -563,9 +539,9 @@ def generate_table1_data(aggregations: list[StrategyAggregation]) -> list[dict[s
         # 附加聚合指标（如果存在）
         strategy_aggs = [a for a in aggregations if a.strategy == strategy]
         if strategy_aggs:
-            avg_slo = sum(a.slo_violation_rate_mean for a in strategy_aggs) / len(strategy_aggs)
+            avg_slo = sum(a.slo_attainment_rate_mean for a in strategy_aggs) / len(strategy_aggs)
             avg_throughput = sum(a.throughput_rps_mean for a in strategy_aggs) / len(strategy_aggs)
-            row["avg_slo_violation_rate"] = avg_slo
+            row["avg_slo_attainment_rate"] = avg_slo
             row["avg_throughput_rps"] = avg_throughput
 
         table_rows.append(row)
@@ -594,10 +570,9 @@ def run_analysis(results_dir: Path, output_dir: Path | None = None) -> None:
     logger.info("Loaded %d run results", len(results))
 
     aggregations = aggregate_results(results)
-    oracle_gaps = compute_oracle_gap(aggregations)
 
     # 导出 JSON 摘要
-    export_summary_json(aggregations, oracle_gaps, output_dir)
+    export_summary_json(aggregations, output_dir)
 
     # 生成 Table 1 数据
     table1 = generate_table1_data(aggregations)
@@ -605,6 +580,141 @@ def run_analysis(results_dir: Path, output_dir: Path | None = None) -> None:
     table1_path.write_text(json.dumps(table1, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info("Table 1 data exported to %s", table1_path)
 
+    # Figure 6: Budget sensitivity (RULE FIG6-DEFAULT: surrogate budget sensitivity)
+    budget_data = compute_budget_sensitivity(aggregations)
+    if budget_data:
+        budget_path = output_dir / "fig6_budget_sensitivity.json"
+        budget_path.write_text(
+            json.dumps(budget_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info("Figure 6 budget sensitivity data exported to %s", budget_path)
+
     # 生成 Figure PDF
-    generated = generate_figures(aggregations, oracle_gaps, output_dir)
+    generated = generate_figures(aggregations, output_dir)
+
+    # Figure 6 plot
+    generated.extend(_plot_budget_sensitivity(budget_data, output_dir / "figures"))
+
     logger.info("Analysis complete. %d figures generated.", len(generated))
+
+
+def compute_budget_sensitivity(
+    aggregations: list[StrategyAggregation],
+) -> list[dict[str, object]]:
+    """计算 surrogate budget sensitivity（RULE FIG6-DEFAULT）。
+
+    衡量不同 rate（压力代理）下 BidKV 的 SLO attainment 变化率。
+
+    Returns
+    -------
+    list[dict]
+        每个 (workload, rate) 点的 BidKV 与所有策略 SLO attainment 对比。
+    """
+    data: list[dict[str, object]] = []
+    workloads = sorted({a.workload for a in aggregations})
+    for workload in workloads:
+        wl_data = [a for a in aggregations if a.workload == workload]
+        rates = sorted({a.request_rate for a in wl_data})
+        for rate in rates:
+            point: dict[str, object] = {"workload": workload, "rate": rate}
+            for a in wl_data:
+                if a.request_rate == rate:
+                    point[f"{a.strategy}_slo"] = a.slo_attainment_rate_mean
+                    point[f"{a.strategy}_ci95"] = a.slo_attainment_rate_ci95
+            data.append(point)
+    return data
+
+
+def _plot_budget_sensitivity(
+    data: list[dict[str, object]],
+    output_dir: Path,
+) -> list[Path]:
+    """Figure 6: Surrogate budget sensitivity — line plot per workload."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return []
+
+    if not data:
+        return []
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+
+    workloads = sorted({d["workload"] for d in data})
+    for workload in workloads:
+        wl_data = [d for d in data if d["workload"] == workload]
+        rates = sorted(d["rate"] for d in wl_data)
+
+        # Extract all strategy names from data keys
+        strategy_keys = set()
+        for d in wl_data:
+            for key in d:
+                if key.endswith("_slo") and key != "rate":
+                    strategy_keys.add(key.replace("_slo", ""))
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for strategy in sorted(strategy_keys):
+            slo_key = f"{strategy}_slo"
+            ci_key = f"{strategy}_ci95"
+            slos = []
+            cis = []
+            for rate in rates:
+                match = [d for d in wl_data if d["rate"] == rate]
+                if match and slo_key in match[0]:
+                    slos.append(float(match[0][slo_key]) * 100)
+                    cis.append(float(match[0].get(ci_key, 0)) * 100)
+                else:
+                    slos.append(0)
+                    cis.append(0)
+            ax.errorbar(rates, slos, yerr=cis, label=strategy, marker="o", capsize=3)
+
+        ax.set_xlabel("Request Rate (req/s) — Surrogate KV Pressure")
+        ax.set_ylabel("SLO Attainment Rate (%)")
+        ax.set_title(f"[Category B] Budget Sensitivity — {workload}")
+        ax.legend(fontsize=8, ncol=2)
+        ax.grid(alpha=0.3)
+
+        path = output_dir / f"fig6_budget_sensitivity_{workload}.pdf"
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        paths.append(path)
+
+    return paths
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI 入口：vLLM 分析脚本。"""
+    import argparse
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(description="BidKV vLLM Result Analysis")
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        required=True,
+        help="Directory containing RunResult JSON files.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for analysis (default: results-dir/analysis).",
+    )
+    args = parser.parse_args(argv)
+
+    results_dir = Path(args.results_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else results_dir / "analysis"
+
+    run_analysis(results_dir, output_dir)
+
+
+if __name__ == "__main__":
+    main()

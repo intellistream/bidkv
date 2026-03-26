@@ -4,7 +4,7 @@
 
 ## 概述
 
-BidKV 实验包含 7 个 baseline + 1 个 Oracle 上界，用于消融实验验证 bid 机制各组件的增量价值。
+BidKV 实验包含 7 个 baseline，用于消融实验验证 bid 机制各组件的增量价值。
 
 **Candidate-universe consistency**: 所有 baseline 在同一 pressure event 中使用同一候选池，保证 within-platform 公平性。
 
@@ -83,15 +83,6 @@ Slack-Aware → BidKV         :  quality-aware vs SLO-only 的收益
 | **选择公式** | `U = r / (δ + ε), greedy by U`（Algorithm 1） |
 | **实现** | 为每个请求生成多级 bid，提交到 pool，使用 GreedyBidSolver 求解 |
 
-### 8. Oracle DP — 精确最优上界
-
-| 字段 | 值 |
-|------|-----|
-| **信息量** | 上界 |
-| **设计理由** | 离线动态规划精确最优解。使用与其他 baseline 完全相同的候选池和 bid，但通过精确 DP 找到全局最优。不可实时使用（计算复杂度高），仅作为理论上界参考。 |
-| **选择公式** | Grouped Knapsack DP：每 request 为一组，约束 Σδ ≤ delta_budget，目标 max Σr |
-| **实现** | 离散化 delta_budget 为 N 步（默认 1000），对每组（请求）依次更新 DP 表 |
-
 ## Candidate-Universe Consistency
 
 所有 baseline 的 `select_victims()` 方法接收同一个 `candidates` 参数。
@@ -106,5 +97,5 @@ Slack-Aware → BidKV         :  quality-aware vs SLO-only 的收益
 |-----------|------|--------------|
 | P1 | Preempt-Evict, Static-Random | 必展示 |
 | P1 | H2O-Style, Global-NoBid | 必展示（核心归因） |
-| P1 | BidKV, Oracle DP | 必展示 |
+| P1 | BidKV | 必展示 |
 | P2 | Uniform, Slack-Aware | 必展示（消融补充） |

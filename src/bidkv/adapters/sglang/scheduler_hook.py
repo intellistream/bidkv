@@ -50,6 +50,7 @@ def install_scheduler_hook(scheduler: Any, adapter: Any) -> None:
         return original_method(*args, **kwargs)
 
     # 安装 monkey-patch
+    patched_get_next_batch_to_run.__wrapped__ = original_method
     scheduler.get_next_batch_to_run = patched_get_next_batch_to_run
 
     # 同时 patch eviction path（如果存在）
@@ -66,11 +67,19 @@ def uninstall_scheduler_hook(scheduler: Any) -> None:
     scheduler:
         SGLang ``Scheduler`` 实例。
     """
-    # 检查是否有 __wrapped__ 属性（monkey-patch 的标准恢复方式）
+    # 恢复 get_next_batch_to_run
     method = getattr(scheduler, "get_next_batch_to_run", None)
     if method is not None and hasattr(method, "__wrapped__"):
         scheduler.get_next_batch_to_run = method.__wrapped__
-        logger.info("SGLang scheduler hook uninstalled")
+        logger.info("SGLang scheduler hook uninstalled (get_next_batch_to_run)")
+
+    # 恢复 RadixCache.evict（如果被 patch 过）
+    radix_cache = _get_tree_cache(scheduler)
+    if radix_cache is not None:
+        evict_method = getattr(radix_cache, "evict", None)
+        if evict_method is not None and hasattr(evict_method, "__wrapped__"):
+            radix_cache.evict = evict_method.__wrapped__
+            logger.info("SGLang scheduler hook uninstalled (RadixCache.evict)")
 
 
 def _hook_eviction_path(scheduler: Any, adapter: Any) -> None:
@@ -104,6 +113,7 @@ def _hook_eviction_path(scheduler: Any, adapter: Any) -> None:
                 return
         return original_evict(num_tokens, *args, **kwargs)
 
+    patched_evict.__wrapped__ = original_evict
     radix_cache.evict = patched_evict
     logger.debug("RadixCache eviction hook installed")
 

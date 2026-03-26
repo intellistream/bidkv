@@ -1,0 +1,10 @@
+{
+  "frozen_at": "2026-03-16T02:12:38.344124+00:00",
+  "model": "/home/cyb/Llama-3.1-8B-Instruct",
+  "num_requests_per_workload": 100,
+  "workloads": [
+    "chat",
+    "summarization",
+    "qa"
+  ]
+}

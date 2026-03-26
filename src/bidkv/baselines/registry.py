@@ -77,7 +77,6 @@ class BaselineRegistry:
         from bidkv.baselines.bidkv_strategy import BidKVStrategy
         from bidkv.baselines.global_nobid import GlobalNoBidStrategy
         from bidkv.baselines.h2o_style import H2OStyleStrategy
-        from bidkv.baselines.oracle_dp import OracleDPStrategy
         from bidkv.baselines.preempt_evict import PreemptEvictStrategy
         from bidkv.baselines.slack_aware import SlackAwareStrategy
         from bidkv.baselines.static_random import StaticRandomStrategy
@@ -91,7 +90,6 @@ class BaselineRegistry:
             GlobalNoBidStrategy(),
             SlackAwareStrategy(),
             BidKVStrategy(),
-            OracleDPStrategy(),
         ]
         for strategy in defaults:
             if strategy.name not in self._strategies:

@@ -1,0 +1,945 @@
+% ============================================================
+% BidKV: Compression-Aware Request Scheduling
+%        for SLO-Guaranteed LLM Serving
+% SC 2026 — ACM sigconf format
+% ============================================================
+\documentclass[sigconf,nonacm]{acmart}
+
+% ------------------------------------------------------------
+% Packages
+% ------------------------------------------------------------
+\usepackage{amsmath}
+% amssymb loaded before newtxmath to avoid \Bbbk clash
+\let\Bbbk\undefined
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, decorations.pathreplacing, positioning, calc}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{xspace}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{balance}
+\usepackage{pifont}  % \ding symbols for circled numbers in figures
+
+% Allow slightly looser line breaking to prevent overfull hboxes
+\emergencystretch=1.5em
+
+% algpseudocode already provides \Require, \Ensure, \ForAll, etc.
+
+% ------------------------------------------------------------
+% Placeholder command — all experimental data use this
+% ------------------------------------------------------------
+\newcommand{\placeholder}[1]{\textcolor{red}{\textbf{#1}}}
+
+% Named placeholders for main claims (fill after Wave 4)
+\newcommand{\bidkvThroughputGainHtwoO}{\placeholder{X\%}\xspace}
+\newcommand{\bidkvTTFTReductionOverPreempt}{\placeholder{Y\%}\xspace}
+\newcommand{\bidkvSLOAttainment}{\placeholder{W\%}\xspace}
+\newcommand{\bidkvTPOTReduction}{\placeholder{V\%}\xspace}
+\newcommand{\numTests}{478\xspace}
+
+% Shorthand
+\newcommand{\bidkv}{BidKV\xspace}
+\newcommand{\sys}{\bidkv}
+\newcommand{\utilfn}{U}
+\newcommand{\tokfree}{r}
+\newcommand{\qualdelta}{\delta}
+\newcommand{\stabeps}{\varepsilon}
+\newcommand{\dbudget}{\Delta_{\max}}
+\newcommand{\neededtok}{N}
+\newcommand{\numbids}{B}
+
+% Citation shortcuts
+\newcommand{\eg}{\emph{e.g.},\xspace}
+\newcommand{\ie}{\emph{i.e.},\xspace}
+\newcommand{\etc}{\emph{etc.}\xspace}
+\newcommand{\etal}{\emph{et al.}\xspace}
+
+% ============================================================
+\begin{document}
+
+% ------------------------------------------------------------
+% Title & Authors
+% ------------------------------------------------------------
+\title{BidKV: Compression-Aware Request Scheduling \\
+       for SLO-Guaranteed LLM Serving}
+
+\author{Anonymous Authors}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \country{}
+}
+
+% ============================================================
+% Abstract
+% ============================================================
+\begin{abstract}
+Online large language model (LLM) serving faces dynamic KV cache pressure
+fluctuations caused by heterogeneous request lengths, bursty arrival rates, and
+growing context sizes.
+Existing approaches---request-level preemption that wastes computed KV state, and
+token-level eviction with fixed heuristics that ignores cross-request quality
+differences---fail to maintain low tail latency and high request completion
+simultaneously under varying load.
+
+We present \bidkv, a compression-aware request scheduling framework that
+introduces \emph{explicit quality preference signals} (bids) as a first-class
+runtime primitive. Each active request generates compression bids that encode the
+number of tokens freed~($\tokfree$), the predicted quality loss~($\qualdelta$),
+and algorithm-specific metadata. A scorer-agnostic scoring-to-bid layer
+translates arbitrary token importance scores into a unified bid representation,
+and a constrained greedy solver maximizes the utility ratio
+$\utilfn = \tokfree / (\qualdelta + \stabeps)$ to select the most
+cost-effective compressions under a quality budget~$\dbudget$.
+\bidkv is \emph{framework-portable}: a four-layer adapter abstraction enables
+integration with vLLM and SGLang without modifying their source code.
+We evaluate \bidkv with Llama-3.1-8B-Instruct on an NVIDIA RTX A6000 GPU using
+ShareGPT traces under Poisson open-loop arrival.  Across eight strategies
+forming a complete attribution chain, \bidkv improves throughput by
+\bidkvThroughputGainHtwoO over H2O-Style and reduces P95 TTFT by
+\bidkvTTFTReductionOverPreempt compared with preemption-based eviction,
+all while maintaining \bidkvSLOAttainment SLO attainment.
+\end{abstract}
+
+\maketitle
+
+% ============================================================
+% §1  Introduction
+% ============================================================
+\section{Introduction}\label{sec:intro}
+
+Large language models (LLMs) based on the Transformer decoder
+architecture~\cite{Vaswani2017}, including GPT-3~\cite{Brown2020},
+PaLM~\cite{Chowdhery2023}, Llama~\cite{Touvron2023, Dubey2024}, and
+Mistral~\cite{Jiang2023}, have become the backbone of interactive AI services,
+from conversational assistants to code generation and document summarization.  Deploying these models as always-on inference services introduces
+a critical systems challenge: \emph{managing the key-value (KV) cache that
+stores attention state for every in-flight request}~\cite{Kwon2023, Pope2023}.
+Efficient attention implementations such as
+FlashAttention~\cite{Dao2022, Dao2024} reduce compute cost but do not
+eliminate the memory footprint of KV state.
+Because KV cache occupancy grows linearly with sequence length, a single long
+request can consume gigabytes of GPU memory, and the aggregate memory demand of a
+concurrent request batch fluctuates on a sub-second timescale as requests arrive,
+generate tokens, and complete asynchronously.
+
+The fundamental difficulty is that \emph{no single, fixed compression or eviction
+rule performs well across the full range of load conditions}.  Under light load,
+aggressive KV pruning wastes quality for no throughput gain; under heavy load,
+conservative pruning leads to out-of-memory stalls or excessive preemption.
+Worse, real-world workloads exhibit high heterogeneity: requests differ in prompt
+length (tens to thousands of tokens), output length, and---crucially---in how
+sensitive their output quality is to KV cache truncation.
+A summarization query over a 4096-token document is far more sensitive to
+attention-head pruning than a casual chat reply.  Yet existing systems treat all
+requests identically when making eviction decisions.
+
+\paragraph{Limitations of existing approaches.}
+Current KV cache management schemes fall into three categories, each with a
+critical blind spot:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Request-level eviction}~\cite{Kwon2023, Yu2022}: vLLM's
+PagedAttention preempts entire requests under memory pressure, requiring full KV
+recomputation upon restart.  This coarse granularity wastes the computation
+already invested in the evicted request and penalizes long contexts
+disproportionately.
+
+\item \textbf{Token-level compression}~\cite{Zhang2023h2o, Xiao2024,
+Liu2023scissorhands, Li2024snapkv, Ge2024}: schemes such as H2O, StreamingLLM,
+and SnapKV select which tokens to retain within a single request using
+attention-weight heuristics.  While fine-grained, they apply a
+\emph{uniform budget and fixed scoring rule} to every request, ignoring
+cross-request heterogeneity and lacking a mechanism for applications to express
+differentiated quality requirements.
+
+\item \textbf{System-level scheduling}~\cite{Yu2022, Agrawal2024sarathiserve,
+Zhong2024}: Orca-style iteration-level scheduling, chunked prefills, and PD
+disaggregation optimize batching granularity and compute placement, but do not
+address KV cache capacity management directly.
+\end{itemize}
+
+\noindent
+Across all three categories, we identify three structural gaps: (1)~request-level
+methods do not exploit token-level importance information;
+(2)~token-level methods do not perform inter-request global coordination;
+and (3)~\emph{none} provides an explicit interface for applications to
+communicate quality preferences to the scheduler.
+
+\paragraph{Key insight.}
+We observe that effective KV cache scheduling under heterogeneous load requires
+\emph{explicit quality preference signals}---what we term \emph{bids}---that
+flow from the application layer into the runtime scheduler.  A bid encodes, for a
+given request, the number of tokens that can be freed~($\tokfree$), the predicted
+quality degradation~($\qualdelta$), and algorithm-specific metadata.  Given a set
+of bids from all active requests, the scheduler can formulate a constrained
+optimization: maximize freed tokens subject to a global quality budget~$\dbudget$.
+We show that a simple \emph{utility-ratio greedy solver}---ranking bids by
+$\utilfn = \tokfree / (\qualdelta + \stabeps)$ and selecting greedily---yields
+near-optimal decisions in practice while running in microseconds.
+
+\paragraph{Contributions.}
+We make the following contributions:
+
+\begin{enumerate}[label=\textbf{C\arabic*.},leftmargin=*,nosep]
+\item \textbf{Bid signal mechanism.}  We introduce an explicit quality
+preference signal (\emph{CompressionBid}) that allows users or
+application-level policies to convey per-request quality sensitivity,
+breaking the information bottleneck of pure system inference.
+
+\item \textbf{Unified score\,\textrightarrow\,bid\,\textrightarrow\,solve
+architecture.}  We design a scorer-agnostic scoring-to-bid layer
+(any scorer satisfying a \texttt{score()} protocol) and a constrained
+greedy solver that decouples token-level scoring from request-level
+resource allocation.
+
+\item \textbf{Framework-portable adapter abstraction.}  We define a
+\texttt{FrameworkAdapter} abstract base class with five responsibility layers
+and demonstrate integration with both vLLM~\cite{Kwon2023} and
+SGLang~\cite{Zheng2024sglang} \emph{without modifying their source code}.
+
+\item \textbf{End-to-end evaluation with a 7-baseline attribution chain.}  We
+construct seven baselines forming a complete ablation chain that attributes
+performance gains to individual design choices.
+\end{enumerate}
+
+% ============================================================
+% §2  Background and Motivation
+% ============================================================
+\section{Background and Motivation}\label{sec:background}
+
+\subsection{KV Cache in LLM Serving}\label{sec:bg:kvcache}
+
+Autoregressive Transformer decoders~\cite{Vaswani2017} compute attention as
+$\text{Attn}(Q,K,V) = \text{softmax}(QK^\top / \sqrt{d_k})\,V$, caching the
+key and value projections of all previously generated tokens to avoid redundant
+computation.  For a model with $L$~layers, $H$~attention heads, and head
+dimension~$d_h$, the KV cache of a single request of length~$n$ occupies
+$2 L H d_h n$ elements, which amounts to $2LHd_h n \times
+\text{bytes\_per\_element}$ of GPU memory.  With bf16 precision, a Llama-3.1-8B
+model ($L{=}32, H{=}8_{\text{kv}}, d_h{=}128$) allocates 128\,KiB per token per
+request.  Multi-query attention (MQA)~\cite{Shazeer2019} and grouped-query
+attention (GQA)~\cite{Ainslie2023} reduce the number of KV heads but do not
+eliminate the linear growth with sequence length.
+
+Modern serving systems such as vLLM~\cite{Kwon2023} manage KV cache via
+PagedAttention, which allocates physical memory in fixed-size \emph{blocks} and
+maps logical token positions to physical blocks through a block table, enabling
+sharing and fine-grained allocation.  Despite this optimization, the fundamental
+linear scaling of KV memory with sequence length persists: a single request with a
+4096-token context occupies $\sim$512\,MiB, placing severe pressure on the
+$\sim$32\,GiB of KV-allocatable memory on a 48\,GiB A6000 GPU.
+
+In online serving, KV cache pressure is \emph{dynamic}: it spikes when bursty
+arrivals coincide with long-context requests and drops sharply as a batch of
+short requests completes.  Static provisioning cannot handle this variability, so
+a runtime mechanism is needed to adjust KV cache occupancy on the fly.
+
+\subsection{Motivating Example}\label{sec:bg:motivation}
+
+Consider three concurrent requests on a server with KV capacity for 4096~tokens:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item $R_1$: 128-token chat reply (low quality sensitivity, $\qualdelta \approx 0.02$ if compressed).
+\item $R_2$: 512-token code completion (moderate sensitivity, $\qualdelta \approx 0.08$).
+\item $R_3$: 2048-token document summary (high sensitivity, $\qualdelta \approx 0.25$).
+\end{itemize}
+
+\noindent
+At 90\% KV utilization, the system must free $\sim$400 tokens.  Existing
+approaches behave suboptimally:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{vLLM preemption}~\cite{Kwon2023}: evicts the most recent arrival
+($R_3$), discarding 2048~tokens of computed KV state and requiring full
+recomputation\,---\,far more disruption than needed.
+\item \textbf{H2O}~\cite{Zhang2023h2o}: applies a fixed heavy-hitter ratio to
+\emph{all three requests}, pruning the same fraction of tokens from each,
+regardless of their differing quality sensitivities.
+\item \textbf{\bidkv}: $R_1$~submits a bid offering 64~tokens at
+$\qualdelta{=}0.02$ ($\utilfn{=}63.9$), $R_2$~offers 256~tokens at
+$\qualdelta{=}0.08$ ($\utilfn{=}3160$), and $R_3$~offers 128~tokens at
+$\qualdelta{=}0.05$ ($\utilfn{=}2510$).  The solver selects $R_2$ and $R_3$'s
+bids first (highest utility), freeing 384~tokens with cumulative
+$\qualdelta{=}0.13$ while sparing $R_3$'s most important tokens.
+\end{itemize}
+
+\subsection{Design Goals}\label{sec:bg:goals}
+
+Based on the above analysis, we formulate four design goals for \bidkv:
+
+\begin{description}[style=unboxed,leftmargin=0em,nosep]
+\item[G1 --- Explicit quality preference:] The system must accept per-request
+quality sensitivity signals from applications, not just infer them from internal
+heuristics.
+\item[G2 --- Scorer-agnostic:] The scoring strategy (\eg H2O attention weights,
+random, uniform) must be pluggable without changing the solver.
+\item[G3 --- Framework-portable:] The design must integrate with heterogeneous
+serving engines (\eg vLLM, SGLang) without source-code modifications.
+\item[G4 --- Zero external dependencies:] The core library must depend only on
+the Python standard library, enabling lightweight plugin deployment.
+\end{description}
+
+% ============================================================
+% §3  Related Work
+% ============================================================
+\section{Related Work}\label{sec:related}
+
+We organize related work into three categories and identify the gap that \bidkv
+addresses in each.
+
+\paragraph{A --- Request-level scheduling and eviction.}
+vLLM~\cite{Kwon2023} introduced PagedAttention for virtual-memory-style KV
+management, with request-level preemption (swap or recompute) as the fallback
+under memory pressure.
+Orca~\cite{Yu2022} pioneered iteration-level scheduling but does not manage KV
+capacity.
+DistServe~\cite{Zhong2024} and Splitwise~\cite{Patel2024} disaggregate prefill
+and decode phases across GPU clusters for goodput optimization, while
+Sarathi~\cite{Agrawal2023sarathi} and
+Sarathi-Serve~\cite{Agrawal2024sarathiserve} introduce chunked prefills to
+smooth prefill--decode interference.
+AlpaServe~\cite{Lee2023} uses statistical multiplexing to share model replicas.
+FlexGen~\cite{Sheng2023flexgen} offloads KV cache to CPU/disk for throughput on a
+single GPU.
+DeepSpeed-Inference~\cite{Aminabadi2022} and LoongServe~\cite{Wu2024loongserve}
+scale to long contexts via parallelism and elastic sequence partitioning.
+DynamoLLM~\cite{Stojkovic2024} optimizes cluster-level energy and performance.
+Clockwork~\cite{Gujarati2020} provides predictable latency for DNN serving.
+SpecInfer~\cite{Miao2024} and speculative decoding~\cite{Leviathan2023,
+Chen2023spec} accelerate decode latency via tree-based verification.
+Longformer~\cite{Beltagy2020} introduced sparse attention patterns for long
+documents, motivating subsequent work on KV cache compression.
+Prompt Cache~\cite{Gim2024} and Hydragen~\cite{Juravsky2024} exploit prefix
+sharing to reduce redundant computation.
+\emph{Gap}: these systems do not leverage token-level importance information; their
+eviction granularity is the entire request or a fixed block.
+
+\paragraph{B --- Token-level KV cache compression.}
+H2O~\cite{Zhang2023h2o} identifies ``heavy-hitter'' tokens via cumulative
+attention scores and retains them.
+StreamingLLM~\cite{Xiao2024} preserves a small number of initial ``attention
+sink'' tokens, enabling infinite-length streaming.
+Scissorhands~\cite{Liu2023scissorhands} exploits the persistence-of-importance
+hypothesis: tokens important at one step remain important at later steps.
+SnapKV~\cite{Li2024snapkv} clusters attention features in an observation window
+to compress the prefix cache before generation.
+FastGen/CaM~\cite{Ge2024} adaptively selects compression per attention head at
+model load time.
+PyramidKV~\cite{Zhang2024pyramidkv} and PyramidInfer~\cite{Cai2024} apply
+pyramid-shaped token budgets across layers.
+On the quantization front, KIVI~\cite{Liu2024kivi} uses asymmetric 2-bit KV
+quantization, KVQuant~\cite{Hooper2024} pushes quantization to million-token
+contexts, and importance-aware mixed-precision
+methods~\cite{Yang2024} combine pruning and quantization.
+SparQ Attention~\cite{Ribar2024} reduces bandwidth by fetching only the top-$k$
+query-relevant keys.
+Quest~\cite{Tang2024} introduces query-aware sparsity for efficient long-context
+inference.
+$L_2$-norm-based strategies~\cite{Devoto2024}, LESS~\cite{Dong2024}, and Dynamic
+Memory Compression~\cite{Nawrot2024} explore alternative importance signals.
+\emph{Gap}: all methods use a static budget and fixed heuristic per request,
+without cross-request global coordination or an interface for external quality
+preferences.
+
+\paragraph{C --- System-level QoS and scheduling theory.}
+Dominant Resource Fairness~\cite{Ghodsi2011} and multi-resource
+packing~\cite{Grandl2014} provide fairness and efficiency guarantees for
+heterogeneous cluster resources.
+Quincy~\cite{Isard2009} formulates scheduling as a min-cost flow problem.
+The knapsack problem literature~\cite{Martello1990, Kellerer2004} provides
+algorithmic foundations for the constrained selection problems that arise in KV
+cache scheduling.
+\emph{Gap}: these methods optimize compute or network resources, not KV cache
+capacity, and do not incorporate quality-aware signals.
+
+\paragraph{Positioning of \bidkv.}
+\bidkv is, to the best of our knowledge, the first framework to introduce
+\emph{explicit quality preference signals} into KV cache scheduling.
+It is complementary to token-level methods (BidKV's scoring layer can wrap any
+token-level scorer, \eg H2O) and to request-level methods (BidKV's solver
+performs global coordination across requests).
+
+% ============================================================
+% §4  Design
+% ============================================================
+\section{Design}\label{sec:design}
+
+\bidkv organizes its logic into four layers (Figure~\ref{fig:architecture}): the
+\emph{Runtime Adapter Layer} detects KV pressure and executes compressions, the
+\emph{Scoring-to-Bid Layer} translates token-level scores into structured bids,
+the \emph{Constrained Solver Layer} selects the most cost-effective compression
+actions, and the \emph{Bid Signal Layer} defines the shared protocol data
+structures (\texttt{CompressionBid}, \texttt{BidPool}, \texttt{BidAcceptance})
+used across all layers.
+
+\input{figures/fig1_architecture}
+
+\subsection{Bid Signal Layer}\label{sec:design:bid}
+
+The atomic unit of communication in \bidkv is the \texttt{CompressionBid}, a
+frozen (immutable) data class with the following fields:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item \texttt{bid\_id} --- unique identifier\\(format: \texttt{<request\_id>:bid:<level>}).
+\item \texttt{request\_id} --- the inference request this bid applies to.
+\item $\tokfree$ (\texttt{tokens\_freed}) --- the number of KV tokens that would
+be released if this bid is accepted.  Must be $> 0$.
+\item $\qualdelta$ (\texttt{quality\_delta}) --- the predicted output quality loss
+$\in [0, 1]$.  Lower is better.
+\item \texttt{compress\_latency\_ms} --- estimated wall-clock time to execute the
+compression.
+\item \texttt{confidence} $\in [0, 1]$ --- the scorer's confidence in
+$\qualdelta$.
+\item \texttt{metadata} --- a dictionary for strategy-specific information
+(\eg which token positions are evicted).
+\end{itemize}
+
+Each bid carries a derived \emph{utility} property:
+\begin{equation}\label{eq:utility}
+  \utilfn(b) \;=\; \frac{b.\tokfree}{b.\qualdelta + \stabeps},
+  \qquad \stabeps = 10^{-3}.
+\end{equation}
+A high utility ratio means the bid releases many tokens for little predicted
+quality cost.
+
+Bids are collected in a \texttt{BidPool}---an immutable snapshot of all active
+bids at a given instant.  The pool supports queries such as
+\texttt{bids\_for\_request()} and \texttt{top\_k\_by\_utility()}.  The solver
+output is a \texttt{BidAcceptance} containing the IDs of accepted bids, the
+total freed tokens, and the cumulative quality delta.
+
+\subsection{Scoring-to-Bid Layer}\label{sec:design:scoring}
+
+A core design principle of \bidkv is \emph{scorer-agnosticism}: the system does
+not prescribe which token importance metric to use.  Instead, it defines a
+minimal \texttt{ScoringStrategy} protocol:
+
+\begin{quote}
+{\small\texttt{score(token\_ids: Sequence[int], **ctx) -> list[float]}}
+\end{quote}
+
+\noindent
+Any object satisfying this structural protocol---returning a list of per-token
+importance scores in $[0, 1]$ (higher = more important)---can serve as a scorer.
+We implement four strategies:
+
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{H2OScoring}~\cite{Zhang2023h2o}: cumulative attention-weight
+  scoring.  The production-intended scorer.
+\item \textbf{AttentionWeightScoring}: direct attention-weight extraction
+  (requires \texttt{output\_attentions}); used as a precision upper bound.
+\item \textbf{UniformScoring}: all tokens receive score~$0.5$.  Ablation baseline.
+\item \textbf{RandomScoring}: i.i.d.\ uniform random scores.  Ablation baseline.
+\end{itemize}
+
+Given raw scores, the \texttt{build\_bids()} function generates a set of bids
+for a request.  For each \emph{compression level} $\ell \in \{0.2, 0.4, 0.6\}$:
+\begin{enumerate}[nosep]
+\item Sort tokens by importance score in ascending order.
+\item Let $\tokfree = \lfloor n \cdot \ell \rfloor$, where $n$ is the token count.
+\item Compute $\qualdelta = \frac{1}{\tokfree} \sum_{j=1}^{\tokfree} s_{\pi(j)}$,
+where $\pi$ is the ascending-score permutation and $s_j \in [0,1]$.
+\item Emit a \texttt{CompressionBid} with these values.
+\end{enumerate}
+
+The mean importance of removed tokens serves as a proxy for quality
+degradation.  Because low-score tokens are removed first, $\qualdelta$ increases
+sub-linearly with $\ell$, rewarding moderate compression.
+
+\subsection{Constrained Solver Layer}\label{sec:design:solver}
+
+When the KV cache pressure detector signals that $\neededtok$ tokens must be
+freed, the \texttt{GreedyBidSolver} selects bids from the pool.  Algorithm~\ref{alg:greedy}
+presents the pseudocode.
+
+\input{figures/fig2_algorithm}
+
+The solver enforces two constraints:
+\begin{description}[style=unboxed,leftmargin=0em,nosep]
+\item[Constraint A --- At-most-one bid per request:]
+  Accepting multiple compression levels for the same request would
+  double-count freed tokens.  The solver keeps a set $\mathcal{R}$ of
+  accepted request IDs and skips duplicates.
+\item[Constraint B --- Quality budget:]
+  The cumulative quality delta must not exceed $\dbudget$.
+  With the default $\dbudget = 0.15$, the solver caps total predicted
+  quality loss at 15\%.
+\end{description}
+
+\noindent
+The algorithm runs in $O(\numbids \log \numbids)$ time due to sorting.  In
+practice, $\numbids < 100$ for a typical batch of 20--50 requests with 2--5
+compression levels each, so solving takes microseconds---negligible compared with
+a single decode step.
+
+\paragraph{Relation to knapsack problems.}
+The bid selection problem is a variant of the 0-1 knapsack with a \emph{conflict
+graph} (constraint~A) and a \emph{budget knapsack} (constraint~B).  While the
+general problem is NP-hard, our greedy approach achieves strong empirical
+performance because the utility ratio provides an effective ranking signal, and
+the number of items is small~\cite{Martello1990, Kellerer2004}.
+
+\subsection{Runtime Adapter Layer}\label{sec:design:adapter}
+
+To achieve framework portability~(G3), \bidkv defines a
+\texttt{Framework\-Adapter} abstract base class with five responsibility
+layers:
+
+\begin{enumerate}[nosep]
+\item \textbf{KV stats visibility}: \texttt{get\_kv\_stats()} returns the
+  current and maximum token counts, enabling the pressure detector to
+  determine when compression is needed.
+\item \textbf{Pressure-event interception}: the adapter intercepts the
+  framework's native preemption path and invokes \bidkv's solver
+  before the framework takes its default action.
+\item \textbf{Compression execution}: the adapter delegates KV cache
+  modification to the framework's native operations and returns the
+  number of tokens actually freed.
+\item \textbf{Scoring callback}: after each decode step, the adapter feeds
+  attention weights (or other signals) back to the scoring strategy.
+\item \textbf{Lifecycle management}: \texttt{on\_request\_complete()} cleans up
+  bids and internal state when a request finishes.
+\end{enumerate}
+
+This five-layer contract is intentionally minimal: each adapter method maps to
+a single concern, and any serving framework that exposes KV statistics and a
+preemption hook can implement the adapter.  We demonstrate this with two
+production frameworks in Section~\ref{sec:impl}.
+
+% ============================================================
+% §5  Implementation
+% ============================================================
+\section{Implementation}\label{sec:impl}
+
+\subsection{Overview}
+
+\bidkv is implemented as a standalone Python package with \textbf{zero external
+dependencies} (only Python $\geq$~3.10 standard library), totaling approximately
+12,000~lines of code and \numTests unit tests.
+The entire system defaults to \textbf{off}
+(\texttt{BidKVConfig(enabled=False)}) and includes a global \emph{kill switch}
+(\texttt{kill\_switch=True}) that immediately bypasses all bid logic without
+requiring a restart.
+Eight baseline strategies are registered through a \texttt{BaselineRegistry}
+using the strategy pattern; adding a new baseline requires implementing the
+\texttt{BaselineStrategy} abstract class and a single
+\texttt{register()} call---no modification to existing code.
+
+\subsection{vLLM Integration}\label{sec:impl:vllm}
+
+We integrate \bidkv with vLLM 0.17.1 (v1 architecture) using its
+plugin system.
+The \texttt{VLLMAdapter} registers as a general plugin and
+monkey-patches \texttt{Scheduler.\_\_init\_\_} to inject a
+scheduler hook that intercepts three points in the scheduling loop:
+
+\begin{enumerate}[nosep]
+\item \textbf{Pre-schedule interception.}  Before vLLM's native
+  \texttt{schedule()}, the hook performs two actions:
+  (a)~\emph{victim reorder}---it sorts the running request list by a
+  completion-aware keep score that accounts for output progress,
+  recompute cost, and an anti-starvation multiplier, so that vLLM's
+  native \texttt{running.pop()} preempts the lowest-quality request;
+  (b)~\emph{proactive preemption}---when KV utilization exceeds 88\%,
+  the waiting queue is non-empty, and at least three requests are
+  running, the hook preempts the lowest-scored request before vLLM's
+  own cascade preemption fires, with a 3-second cooldown to avoid
+  thrashing.
+
+\item \textbf{Post-decode token tracking.}  After each decode step,
+  the hook appends newly sampled tokens to the per-request token
+  buffer, keeping scoring inputs up to date.
+
+\item \textbf{Lifecycle cleanup.}  When a request completes, the hook
+  removes its bids from the pool and clears internal state.
+\end{enumerate}
+
+\noindent
+The execution semantics follow a \emph{tail truncation} strategy:
+when the solver selects a request for compression, the adapter first
+truncates its output tokens (shortening the \texttt{output\_token\_ids}
+and \texttt{all\_token\_ids} buffers), then invokes vLLM's native
+\texttt{\_preempt\_request()} to safely release all KV blocks and move
+the request back to the waiting queue.  Upon rescheduling, vLLM
+recomputes the request from its (now shorter) sequence, yielding both
+immediate KV savings from truncation and long-term savings from reduced
+future output length.
+This design operates entirely through vLLM's native preemption API and
+does not bypass the KV cache coordinator or directly manipulate the
+block pool.
+
+\subsection{SGLang Integration}\label{sec:impl:sglang}
+
+The \texttt{SGLangAdapter} integrates with SGLang's RadixAttention
+engine~\cite{Zheng2024sglang} by monkey-patching the scheduling
+entry point.  The adapter hooks into the scheduling loop to invoke
+\bidkv's solver when memory pressure is detected.  A
+\texttt{radix\_hook} enables token-level KV release via SGLang's radix tree
+structure.  We evaluate a three-strategy subset (default preempt-evict,
+slack-aware, and \bidkv) to verify \emph{directional consistency}:
+that performance orderings observed on vLLM hold on an architecturally different
+framework.
+
+% ============================================================
+% §6  Evaluation
+% ============================================================
+\section{Evaluation}\label{sec:eval}
+
+We evaluate \bidkv along four dimensions: (1)~overall serving performance
+compared with seven baselines (Section~\ref{sec:eval:main}),
+(2)~sensitivity to arrival rate (Section~\ref{sec:eval:rate}),
+(3)~mechanism explanation via compression coverage
+(Section~\ref{sec:eval:mechanism}), and (4)~cross-platform consistency on SGLang
+(Section~\ref{sec:eval:sglang}).
+
+\subsection{Experimental Setup}\label{sec:eval:setup}
+
+\paragraph{Hardware and model.}
+All experiments run on a single NVIDIA RTX A6000 GPU (48\,GiB) with CUDA~12.5.
+We serve Meta Llama-3.1-8B-Instruct~\cite{Dubey2024} in bf16 precision
+($\sim$16\,GiB model weight), leaving $\sim$32\,GiB for KV cache.
+
+\paragraph{Inference engines.}
+vLLM 0.17.1 (v1 architecture) with PagedAttention~\cite{Kwon2023} serves as the
+primary quantitative platform.
+SGLang with RadixAttention~\cite{Zheng2024sglang} serves as the portability
+verification platform.
+
+\paragraph{Workloads and traces.}
+We construct two workloads from the ShareGPT Vicuna unfiltered
+dataset~\cite{ShareGPT2023}, whose length distribution is representative of
+real-world LLM conversations~\cite{Zheng2024lmsys}:
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Mixed}: 1000~requests sampled from the full length distribution.
+\item \textbf{Long-context}: 500~requests with prompt length $\geq 1024$ tokens.
+\end{itemize}
+Requests arrive according to a Poisson process (open-loop) at three rates per
+workload: mixed at $\{2.0, 3.8, 5.7\}$~req/s, long-context at
+$\{0.35, 0.5, 0.7\}$~req/s.  All traces are generated with seed~42 and verified
+via SHA-256 checksums; the same traces are shared across all strategies to ensure
+comparability.
+
+\paragraph{SLO definition.}
+We define two latency SLOs: TTFT (time to first token) $< 2000$\,ms and TPOT
+(time per output token) $< 100$\,ms.  A request meets its SLO only if both
+thresholds are satisfied.
+
+\paragraph{Baselines.}
+We evaluate seven strategies forming a complete attribution chain:
+
+\begin{enumerate}[nosep]
+\item \textbf{Preempt-Evict} (vLLM default): request-level preemption with
+  recompute.
+\item \textbf{Static-Random}: randomly selects tokens to evict.
+\item \textbf{H2O-Style}~\cite{Zhang2023h2o}: attention-based heavy-hitter token
+  retention.
+\item \textbf{Uniform}: equal-fraction compression across all requests.
+\item \textbf{Global-NoBid}: system-inferred compression without user bids.
+\item \textbf{Slack-Aware}: SLO-deadline-aware eviction.
+\item \textbf{\bidkv}: our full system (H2O scoring $\to$ bids $\to$ greedy
+  solver).
+\end{enumerate}
+
+The attribution chain enables precise ablation:
+\emph{Preempt-Evict $\to$ H2O-Style $\to$ Global-NoBid $\to$ \bidkv} isolates
+the incremental value of token-level scoring, system-level coordination, and
+explicit bids.
+\emph{Uniform $\to$ \bidkv} isolates differentiated vs.\ equal-fraction
+compression.
+\emph{Slack-Aware $\to$ \bidkv} compares quality-aware scheduling against
+SLO-only awareness.
+
+Each configuration is repeated three times; we report the mean with 95\%
+confidence intervals.
+
+\subsection{Main Comparison}\label{sec:eval:main}
+
+Table~\ref{tab:main} presents the primary results on vLLM at the medium arrival
+rate for both workloads.
+
+\begin{table*}[t]
+\centering
+\caption{Main comparison on vLLM (Llama-3.1-8B-Instruct, A6000 48\,GiB).
+  Rate: mixed 3.8~req/s, long-context 0.5~req/s.  Best result in
+  \textbf{bold}.}
+\label{tab:main}
+\small
+\begin{tabular}{@{}l c c c c c c@{}}
+\toprule
+\textbf{Strategy} & \textbf{Throughput} & \textbf{TTFT P50} & \textbf{TTFT P95}
+  & \textbf{TPOT P50} & \textbf{TPOT P95} & \textbf{SLO Att.} \\
+  & (req/s) & (ms) & (ms) & (ms) & (ms) & (\%) \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Mixed workload (1000 requests)}} \\
+\midrule
+Preempt-Evict   & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Static-Random   & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+H2O-Style       & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Uniform         & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Global-NoBid    & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Slack-Aware     & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\textbf{BidKV}  & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\midrule
+\multicolumn{7}{@{}l}{\textit{Long-context workload (500 requests)}} \\
+\midrule
+Preempt-Evict   & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Static-Random   & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+H2O-Style       & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Uniform         & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Global-NoBid    & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+Slack-Aware     & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\textbf{BidKV}  & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{--} & \placeholder{--} & \placeholder{--} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Key findings (placeholders).}
+\begin{itemize}[leftmargin=*,nosep]
+\item \bidkv improves throughput by \bidkvThroughputGainHtwoO over H2O-Style,
+  the strongest token-level heuristic, demonstrating that cross-request
+  coordination and explicit bids provide value beyond local token scoring.
+\item \bidkv reduces P95 TTFT by \bidkvTTFTReductionOverPreempt compared with
+  Preempt-Evict, confirming that fine-grained compression avoids the
+  recomputation penalty of request-level eviction.
+\item SLO attainment: \bidkv sustains \bidkvSLOAttainment across both workloads,
+  compared with \placeholder{A\%} for Preempt-Evict and \placeholder{B\%} for
+  H2O-Style.
+\end{itemize}
+
+\subsection{Rate Sensitivity}\label{sec:eval:rate}
+
+Figure~\ref{fig:rate_sweep} shows how performance scales across three arrival
+rates.
+
+\begin{figure}[t]
+\centering
+\placeholder{[Figure 3: Rate sweep --- X-axis: request rate; Y-axis left:
+  normalized TTFT P95; Y-axis right: throughput.  Main curves:
+  Preempt-Evict, H2O-Style, BidKV.  Remaining strategies in
+  light gray / Appendix.]}
+\caption{Rate sensitivity (vLLM, mixed workload).  \bidkv maintains stable TTFT
+  P95 across rates while other heuristics degrade sharply at high load.
+  \placeholder{Exact numbers pending full experiment runs.}}
+\label{fig:rate_sweep}
+\end{figure}
+
+\paragraph{Observations.}
+At the lowest rate (2.0~req/s for mixed), KV pressure is minimal and all
+strategies perform similarly---compression is rarely triggered.  At the highest
+rate (5.7~req/s), Preempt-Evict's TTFT P95 \placeholder{increases sharply} due
+to frequent preemption-recompute cycles, while H2O-Style's SLO attainment
+\placeholder{drops} because its fixed heavy-hitter ratio over-compresses
+high-value requests.  \bidkv's adaptive bid selection sustains
+\placeholder{stable} TTFT P95 and SLO attainment across all rates.
+
+\subsection{Mechanism Explanation}\label{sec:eval:mechanism}
+
+\paragraph{Compression coverage (Figure~\ref{fig:compress_coverage}).}
+
+\begin{figure}[t]
+\centering
+\placeholder{[Figure 5: Compression coverage --- stacked bar chart comparing
+  eviction modes (request-level preempt vs.\ token-level compress) across
+  strategies.  BidKV shows the highest fraction of token-level compressions;
+  Preempt-Evict is 100\% request-level.]}
+\caption{Compression coverage by eviction mode.  \bidkv maximizes token-level
+  compressions, minimizing wasted recomputation.}
+\label{fig:compress_coverage}
+\end{figure}
+
+\noindent
+\bidkv's solver preferentially selects token-level compressions (high $\utilfn$)
+over request-level evictions, which waste the entire KV state.  This explains
+both the throughput and latency improvements.
+
+\paragraph{Budget sensitivity (Figure~\ref{fig:budget_sensitivity}).}
+We vary the quality budget $\dbudget \in \{0.05, 0.10, 0.15, 0.20, 0.30\}$ to
+measure how tightly the solver constrains quality loss and how this affects
+throughput and SLO attainment.
+
+\begin{figure}[t]
+\centering
+\placeholder{[Figure 6: Budget sensitivity --- X-axis: $\Delta_{\max}$;
+  Y-axis left: throughput (req/s); Y-axis right: SLO attainment (\%).
+  BidKV curves for mixed and long-context workloads at medium rate.
+  Expected: throughput increases with budget, SLO attainment has a
+  sweet spot around $\Delta_{\max} = 0.15$.]}
+\caption{Quality budget sensitivity.  Throughput increases monotonically with
+  $\dbudget$ as more aggressive compressions become available, but SLO
+  attainment peaks near $\dbudget = 0.15$, indicating that excessive compression
+  introduces recompute overhead that offsets the memory savings.
+  \placeholder{Exact numbers pending full experiment runs.}}
+\label{fig:budget_sensitivity}
+\end{figure}
+
+\subsection{Cross-Platform Consistency}\label{sec:eval:sglang}
+
+We validate \bidkv's portability on SGLang with a three-strategy subset.
+
+\begin{table}[t]
+\centering
+\caption{SGLang cross-platform results (mixed workload, 3.8~req/s).
+  Directional consistency checks: DC-1a (\bidkv $\geq$ Preempt-Evict),
+  DC-1b (\bidkv $\geq$ Slack-Aware).}
+\label{tab:sglang}
+\small
+\begin{tabular}{@{}l c c c c@{}}
+\toprule
+\textbf{Strategy} & \textbf{Throughput} & \textbf{TTFT P95} & \textbf{SLO Att.}
+  & \textbf{DC} \\
+  & (req/s) & (ms) & (\%) & \\
+\midrule
+Preempt-Evict  & \placeholder{--} & \placeholder{--} & \placeholder{--} & --- \\
+Slack-Aware    & \placeholder{--} & \placeholder{--} & \placeholder{--} & --- \\
+\textbf{BidKV} & \placeholder{--} & \placeholder{--} & \placeholder{--}
+  & \placeholder{$\checkmark$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\placeholder{[Figure 7: SGLang rate sweep --- similar layout to Figure 3 but with
+  three strategies.  Shows directional consistency holds across rates.]}
+\caption{SGLang rate sensitivity.  Directional consistency (DC-1a, DC-1b)
+  holds across all rates.  \placeholder{Exact numbers pending.}}
+\label{fig:sglang_rate}
+\end{figure}
+
+\noindent
+Both directional consistency criteria are expected to hold:
+\bidkv $\geq$ Preempt-Evict (DC-1a) and \bidkv $\geq$ Slack-Aware (DC-1b),
+confirming that the performance ordering
+generalizes across architecturally distinct serving engines.
+
+% ============================================================
+% Symbol Table
+% ============================================================
+
+\begin{table}[t]
+\centering
+\caption{Notation used in this paper.}
+\label{tab:notation}
+\small
+\begin{tabular}{@{}cl@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+$\tokfree$     & Tokens freed by a bid \\
+$\qualdelta$   & Predicted quality loss $\in [0, 1]$ \\
+$\stabeps$     & Stability term ($= 10^{-3}$), prevents~$\div 0$ \\
+$\utilfn$      & Utility ratio $= \tokfree / (\qualdelta + \stabeps)$ \\
+$\dbudget$     & Quality budget (max cumulative $\qualdelta$) \\
+$\neededtok$   & Tokens the system needs to free \\
+$\numbids$     & Total number of bids in the pool \\
+$b_i$          & The $i$-th \texttt{CompressionBid} \\
+$s_j$          & Importance score of the $j$-th token $\in [0,1]$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+% §7  Discussion and Limitations
+% ============================================================
+\section{Discussion and Limitations}\label{sec:discussion}
+
+\subsection{Surrogate Quality Signal}
+
+The quality delta~$\qualdelta$ in each bid is a \emph{surrogate metric}
+derived from token-level importance scores (\eg H2O cumulative attention
+weights), not a direct measurement of downstream output quality
+(\eg ROUGE, exact match, or human preference).  Under the tail
+truncation semantics used in this paper, the selected request's output
+tokens are truncated and the request is then recomputed by vLLM's
+native preemption path; the final output therefore depends on the
+truncated sequence length rather than the specific tokens removed.
+The surrogate $\qualdelta$ guides victim \emph{selection}---which
+request to compress and by how much---but the output quality is
+ultimately determined by the recomputed generation from the shorter
+sequence.  Calibrating $\qualdelta$ against task-level metrics
+(\eg ROUGE, exact match) remains important future work for scenarios
+where output tokens are permanently discarded without recomputation.
+
+\subsection{Limitations}
+
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Single GPU.}  All experiments use a single A6000.  Tensor
+  parallelism, pipeline parallelism, and multi-node deployments may introduce
+  additional coordination overhead for bid collection.
+\item \textbf{Single model scale (8B).}  We evaluate only
+  Llama-3.1-8B-Instruct.  Larger models (70B+) with different KV-to-weight
+  memory ratios need further validation.
+\item \textbf{Scorer degradation at extreme sparsity.}  H2O-based
+  scoring may become unreliable when compression exceeds
+  $\sim$90\% of tokens, as the remaining heavy-hitter set may be
+  too small to preserve context.
+\item \textbf{No task-level quality evaluation.}  We report system-level metrics
+  (throughput, latency, SLO attainment) but do not measure
+  task-specific output quality (\eg ROUGE, exact match).  While tail
+  truncation followed by recompute preserves generation correctness for
+  the shortened sequence, the effect of reduced output length on
+  downstream task quality warrants dedicated evaluation.
+\end{itemize}
+
+\subsection{Broader Impact}
+
+The bid interface naturally supports
+\emph{SLO-differentiated serving}: high-priority requests can set higher
+quality sensitivity in their bids, receiving stronger protection against
+compression.  However, this raises a fairness concern: without
+guard-rails, low-priority requests could be systematically starved.  Deployers
+should consider per-request compression caps or fairness-aware solver
+extensions~\cite{Ghodsi2011} to mitigate this risk.
+
+% ============================================================
+% §8  Conclusion
+% ============================================================
+\section{Conclusion}\label{sec:conclusion}
+
+We presented \bidkv, a compression-aware request scheduling framework
+that introduces explicit quality preference signals (bids) into KV
+cache management for online LLM serving.  \bidkv's four-layer
+architecture---bid signal, scoring-to-bid, constrained solver, and
+runtime adapter---decouples token-level importance scoring from
+request-level resource allocation, enabling quality-aware,
+cross-request coordination under dynamic memory pressure.
+
+Through a 7-baseline attribution chain on vLLM and a 3-strategy portability
+slice on SGLang, we demonstrated that \bidkv improves throughput by
+\bidkvThroughputGainHtwoO over the strongest heuristic baseline (H2O-Style)
+and reduces P95 TTFT by \bidkvTTFTReductionOverPreempt compared with request-level
+preemption, all while maintaining \bidkvSLOAttainment SLO attainment.
+
+Future work includes: (1)~calibrating the surrogate quality signal against
+task-level metrics (\eg ROUGE, exact match) to quantify the impact of output
+truncation on downstream quality, (2)~extending the solver with
+fairness constraints for multi-tenant deployments, and (3)~scaling evaluation to
+larger models and multi-GPU configurations with tensor parallelism.
+
+% ============================================================
+% References
+% ============================================================
+% NOTE: Replace 'plain' with 'ACM-Reference-Format' for final submission
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}

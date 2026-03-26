@@ -516,6 +516,20 @@ class TestSchedulerHookIntegration:
         assert "req-1" not in adapter_active.get_tracked_requests()
 
 
+class _FakeRequest:
+    """Minimal fake vLLM Request for testing _preempt_request path."""
+
+    def __init__(self, request_id: str, status: str = "RUNNING") -> None:
+        self.request_id = request_id
+        self.status = status
+        self.num_computed_tokens = 100
+        self.num_prompt_tokens = 50
+        self._output_token_ids: list[int] = list(range(50))
+        self._all_token_ids: list[int] = list(range(100))
+        self.spec_token_ids: list[int] = []
+        self.num_preemptions = 0
+
+
 class _FakeScheduler:
     """用于测试 hook 安装的简易 FakeScheduler。
 
@@ -524,11 +538,26 @@ class _FakeScheduler:
     """
 
     def __init__(self) -> None:
-        self.running: list = []
+        self.running: list[_FakeRequest] = []
+        self.requests: dict[str, _FakeRequest] = {}
         self.schedule_call_count = 0
         self.update_call_count = 0
         self.free_count = 0
         self.kv_cache_manager = None
+        self.preempted_requests: list[str] = []
+
+    def add_running_request(self, request_id: str) -> _FakeRequest:
+        """Helper: add a fake running request."""
+        try:
+            from vllm.v1.request import RequestStatus
+
+            status = RequestStatus.RUNNING
+        except ImportError:
+            status = "RUNNING"
+        req = _FakeRequest(request_id, status=status)
+        self.requests[request_id] = req
+        self.running.append(req)
+        return req
 
     def schedule(self) -> str:
         self.schedule_call_count += 1
@@ -541,3 +570,452 @@ class _FakeScheduler:
     def _free_request(self, request: object) -> str:
         self.free_count += 1
         return "free_called"
+
+    def _preempt_request(self, request: _FakeRequest, timestamp: float) -> None:
+        self.preempted_requests.append(request.request_id)
+
+
+# ---------------------------------------------------------------------------
+# Test: Compression Execution (tail_truncation + native preempt)
+# ---------------------------------------------------------------------------
+
+
+class TestCompressionExecution:
+    """压缩执行路径测试（截断 output + native preempt）。"""
+
+    def test_execute_recompute_fallback_basic(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """验证 recompute fallback 调用 scheduler._preempt_request()。"""
+        scheduler = _FakeScheduler()
+        scheduler.add_running_request("req-1")
+        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter.track_request("req-1", list(range(100)))
+
+        freed = adapter.execute_compression("req-1", 50)
+
+        assert freed == 100  # Releases ALL tokens via preemption
+        assert scheduler.preempted_requests == ["req-1"]
+        assert "req-1" not in [r.request_id for r in scheduler.running]
+
+    def test_execute_recompute_fallback_cleans_state(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """验证 recompute fallback 清理 BidKV 内部状态。"""
+        scheduler = _FakeScheduler()
+        scheduler.add_running_request("req-1")
+        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter.track_request("req-1", list(range(80)))
+
+        freed = adapter.execute_compression("req-1", 40)
+
+        assert freed == 80
+        assert "req-1" not in adapter.get_tracked_requests()
+        assert adapter.metrics.total_compressions == 1
+        assert adapter.metrics.total_tokens_freed == 80
+
+    def test_execute_recompute_fallback_no_scheduler(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """scheduler=None 时返回 0。"""
+        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring)
+        adapter.track_request("req-1", list(range(50)))
+
+        freed = adapter.execute_compression("req-1", 50)
+        assert freed == 0
+
+    def test_execute_recompute_fallback_no_tokens(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """没有追踪的 token 时返回 0。"""
+        scheduler = _FakeScheduler()
+        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+
+        freed = adapter.execute_compression("req-unknown", 50)
+        assert freed == 0
+        assert scheduler.preempted_requests == []
+
+    def test_execute_recompute_fallback_empty_tokens(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """追踪的 token 列表为空时返回 0。"""
+        scheduler = _FakeScheduler()
+        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter.track_request("req-1", [])
+
+        freed = adapter.execute_compression("req-1", 50)
+        assert freed == 0
+        assert scheduler.preempted_requests == []
+
+
+# ---------------------------------------------------------------------------
+# Test: execution_mode routing
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionModeRouting:
+    """execution_mode 路由测试。"""
+
+    def test_default_execution_mode_is_tail_truncation(self) -> None:
+        """默认 execution_mode 为 tail_truncation。"""
+        config = BidKVConfig()
+        assert config.execution_mode == "tail_truncation"
+
+    def test_invalid_execution_mode_raises(self) -> None:
+        """无效 execution_mode 在构造时抛出 ValueError。"""
+        with pytest.raises(ValueError, match="execution_mode must be one of"):
+            BidKVConfig(execution_mode="invalid")
+
+    def test_tail_truncation_routes_to_mode_b(self, h2o_scoring: H2OScoring) -> None:
+        """tail_truncation 模式路由到 _execute_tail_truncation。"""
+        config = BidKVConfig(enabled=True, kill_switch=False, execution_mode="tail_truncation")
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        req = scheduler.add_running_request("req-1")
+        adapter = VLLMAdapter(config=config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter.track_request("req-1", list(range(80)))
+
+        freed = adapter.execute_compression("req-1", 32)
+        # Truncates output tokens then preempts (frees all tracked)
+        assert freed == 80
+        assert scheduler.preempted_requests == ["req-1"]
+        # Output tokens were truncated before preemption
+        assert len(req._output_token_ids) == 8  # 40 output - 32 truncated
+        assert len(req._all_token_ids) == 48  # 40 prompt + 8 output
+
+    def test_execution_mode_preserved_through_kill_switch(self, h2o_scoring: H2OScoring) -> None:
+        """kill switch 激活/解除不改变 execution_mode。"""
+        config = BidKVConfig(enabled=True, kill_switch=False, execution_mode="tail_truncation")
+        adapter = VLLMAdapter(config=config, scoring=h2o_scoring)
+
+        adapter.activate_kill_switch()
+        assert adapter.config.execution_mode == "tail_truncation"
+
+        adapter.deactivate_kill_switch()
+        assert adapter.config.execution_mode == "tail_truncation"
+
+
+# ---------------------------------------------------------------------------
+# Fakes: KV cache hierarchy for tail truncation testing
+# ---------------------------------------------------------------------------
+
+
+class _FakeBlock:
+    """Minimal fake vLLM KVCacheBlock."""
+
+    def __init__(self, block_id: int, ref_cnt: int = 1) -> None:
+        self.block_id = block_id
+        self.ref_cnt = ref_cnt
+
+
+class _FakeBlockPool:
+    """Minimal fake vLLM BlockPool."""
+
+    def __init__(self, block_size: int = 16) -> None:
+        self.hash_block_size = block_size
+        self.num_gpu_blocks = 100
+        self.freed_blocks: list[_FakeBlock] = []
+
+    def free_blocks(self, blocks: list[_FakeBlock]) -> None:
+        for blk in blocks:
+            blk.ref_cnt -= 1
+            self.freed_blocks.append(blk)
+
+    def get_usage(self) -> float:
+        return 0.9
+
+
+class _FakeSingleTypeKVCacheManager:
+    """Minimal fake SingleTypeKVCacheManager with req_to_blocks."""
+
+    def __init__(self, block_pool: _FakeBlockPool, block_size: int = 16) -> None:
+        self.block_pool = block_pool
+        self.block_size = block_size
+        self.req_to_blocks: dict[str, list[_FakeBlock]] = {}
+
+    def add_request_blocks(
+        self, request_id: str, num_blocks: int, *, shared_prefix: int = 0
+    ) -> None:
+        blocks = []
+        for i in range(num_blocks):
+            ref = 2 if i < shared_prefix else 1
+            blocks.append(_FakeBlock(block_id=i, ref_cnt=ref))
+        self.req_to_blocks[request_id] = blocks
+
+
+class _FakeCoordinator:
+    """Minimal fake KVCacheCoordinator."""
+
+    def __init__(self, single_type_manager: _FakeSingleTypeKVCacheManager) -> None:
+        self.single_type_managers = (single_type_manager,)
+        self.block_pool = single_type_manager.block_pool
+
+
+class _FakeKVCacheManager:
+    """Minimal fake KVCacheManager for tail truncation testing."""
+
+    def __init__(self, block_size: int = 16, num_blocks_per_request: int = 5) -> None:
+        self.block_pool = _FakeBlockPool(block_size)
+        self._single_mgr = _FakeSingleTypeKVCacheManager(self.block_pool, block_size)
+        self.coordinator = _FakeCoordinator(self._single_mgr)
+        self._num_blocks_per_request = num_blocks_per_request
+
+    def add_request(self, request_id: str, *, shared_prefix: int = 0) -> None:
+        self._single_mgr.add_request_blocks(
+            request_id, self._num_blocks_per_request, shared_prefix=shared_prefix
+        )
+
+
+class _FakeSchedulerWithKV(_FakeScheduler):
+    """FakeScheduler with a fake KV cache manager for tail truncation tests."""
+
+    def __init__(self, block_size: int = 16, num_blocks_per_request: int = 5) -> None:
+        super().__init__()
+        self.kv_cache_manager = _FakeKVCacheManager(block_size, num_blocks_per_request)
+        self._block_size = block_size
+        self._num_blocks = num_blocks_per_request
+
+    def add_running_request(self, request_id: str) -> _FakeRequest:
+        req = super().add_running_request(request_id)
+        # Set token counts consistent with KV blocks
+        total_tokens = self._block_size * self._num_blocks
+        req.num_prompt_tokens = total_tokens // 2
+        req.num_computed_tokens = total_tokens
+        output_len = total_tokens - req.num_prompt_tokens
+        req._output_token_ids = list(range(output_len))
+        req._all_token_ids = list(range(total_tokens))
+        self.kv_cache_manager.add_request(request_id)
+        return req
+
+
+# ---------------------------------------------------------------------------
+# Test: Tail Truncation
+# ---------------------------------------------------------------------------
+
+
+class TestTailTruncation:
+    """Tail truncation tests (truncate output + native preempt).
+
+    Semantics: truncate output tokens THEN use vLLM native
+    preemption path. This avoids GPUModelRunner InputBatch block-table
+    desync while providing permanent KV footprint reduction.
+    """
+
+    def _make_adapter(
+        self,
+        scheduler: _FakeScheduler,
+        h2o_scoring: H2OScoring,
+    ) -> VLLMAdapter:
+        config = BidKVConfig(enabled=True, kill_switch=False, execution_mode="tail_truncation")
+        return VLLMAdapter(config=config, scoring=h2o_scoring, scheduler=scheduler)
+
+    def test_basic_truncation_preempts(self, h2o_scoring: H2OScoring) -> None:
+        """Truncates output then preempts. Freed = full tracked tokens."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        scheduler.add_running_request("req-1")
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        freed = adapter.execute_compression("req-1", 32)
+
+        assert freed == 80  # full preemption (all tracked tokens)
+        assert scheduler.preempted_requests == ["req-1"]
+        assert adapter.metrics.total_compressions == 1
+        assert adapter.metrics.total_tokens_freed == 80
+
+    def test_output_tokens_truncated_before_preemption(self, h2o_scoring: H2OScoring) -> None:
+        """Output tokens are truncated before the preemption call."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        req = scheduler.add_running_request("req-1")
+        # 5 blocks × 16 = 80 total, prompt=40, output=40
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        adapter.execute_compression("req-1", 32)  # truncate 32 output tokens
+
+        # Output tokens were truncated before preemption
+        assert len(req._output_token_ids) == 8  # 40 - 32
+        assert len(req._all_token_ids) == 48  # 40 prompt + 8 output
+
+    def test_truncation_capped_at_output_length(self, h2o_scoring: H2OScoring) -> None:
+        """target_tokens > output_len → truncates all output, then preempts."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        req = scheduler.add_running_request("req-1")
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        freed = adapter.execute_compression("req-1", 1000)  # huge target
+
+        # Only 40 output tokens available to truncate
+        assert len(req._output_token_ids) == 0
+        assert len(req._all_token_ids) == 40  # only prompt remains
+        assert scheduler.preempted_requests == ["req-1"]
+        assert freed == 80  # full preemption
+
+    def test_no_output_still_preempts(self, h2o_scoring: H2OScoring) -> None:
+        """Request with 0 output tokens → still preempted (pure preemption)."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        req = scheduler.add_running_request("req-1")
+        # Override: all tokens are prompt, no output
+        req.num_prompt_tokens = 80
+        req._output_token_ids = []
+        req._all_token_ids = list(range(80))
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        freed = adapter.execute_compression("req-1", 32)
+
+        assert freed == 80  # full preemption
+        assert scheduler.preempted_requests == ["req-1"]
+
+    def test_tracked_tokens_removed_after_preemption(self, h2o_scoring: H2OScoring) -> None:
+        """After truncation, request is removed from tracking (preempted)."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        scheduler.add_running_request("req-1")
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        adapter.execute_compression("req-1", 32)
+
+        assert "req-1" not in adapter.get_tracked_requests()
+
+    def test_truncation_no_scheduler_returns_zero(self, h2o_scoring: H2OScoring) -> None:
+        """scheduler=None 时返回 0。"""
+        config = BidKVConfig(enabled=True, kill_switch=False, execution_mode="tail_truncation")
+        adapter = VLLMAdapter(config=config, scoring=h2o_scoring)
+        adapter.track_request("req-1", list(range(50)))
+
+        freed = adapter.execute_compression("req-1", 20)
+        assert freed == 0
+
+    def test_mode_b_with_plain_scheduler_fallback(self, h2o_scoring: H2OScoring) -> None:
+        """Truncation works with plain scheduler (no kv_cache_manager)."""
+        scheduler = _FakeScheduler()  # no kv_cache_manager
+        scheduler.add_running_request("req-1")
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(60)))
+
+        freed = adapter.execute_compression("req-1", 20)
+
+        # Still works: truncates output then preempts via recompute fallback
+        assert freed == 60
+        assert scheduler.preempted_requests == ["req-1"]
+
+    def test_partial_output_truncation(self, h2o_scoring: H2OScoring) -> None:
+        """Truncate fewer tokens than output length."""
+        scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
+        req = scheduler.add_running_request("req-1")
+        # prompt=40, output=40
+        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter.track_request("req-1", list(range(80)))
+
+        adapter.execute_compression("req-1", 10)  # truncate only 10
+
+        assert len(req._output_token_ids) == 30  # 40 - 10
+        assert len(req._all_token_ids) == 70  # 40 + 30
+        assert scheduler.preempted_requests == ["req-1"]
+
+
+# ---------------------------------------------------------------------------
+# Test: Truncation Hook (unit-level)
+# ---------------------------------------------------------------------------
+
+
+class TestTruncationHook:
+    """truncation_hook.py 的底层单元测试。"""
+
+    def test_single_type_truncate_basic(self) -> None:
+        """SingleType 截断：释放 2/5 blocks。"""
+        from bidkv.adapters.vllm.truncation_hook import _single_type_truncate_tail_blocks
+
+        pool = _FakeBlockPool(block_size=16)
+        mgr = _FakeSingleTypeKVCacheManager(pool, block_size=16)
+        mgr.add_request_blocks("req-1", 5)
+
+        result = _single_type_truncate_tail_blocks(mgr, "req-1", 2)
+
+        assert result.success is True
+        assert result.actual_freed_blocks == 2
+        assert result.actual_freed_tokens == 32
+        assert result.new_num_blocks == 3
+        assert len(mgr.req_to_blocks["req-1"]) == 3
+        assert len(pool.freed_blocks) == 2
+
+    def test_single_type_truncate_keep_at_least_one(self) -> None:
+        """INV-4：不释放所有 blocks。"""
+        from bidkv.adapters.vllm.truncation_hook import _single_type_truncate_tail_blocks
+
+        pool = _FakeBlockPool(block_size=16)
+        mgr = _FakeSingleTypeKVCacheManager(pool, block_size=16)
+        mgr.add_request_blocks("req-1", 3)
+
+        result = _single_type_truncate_tail_blocks(mgr, "req-1", 100)
+
+        assert result.success is True
+        assert result.actual_freed_blocks == 2  # keep 1
+        assert len(mgr.req_to_blocks["req-1"]) == 1
+
+    def test_single_type_truncate_shared_prefix(self) -> None:
+        """INV-7：shared prefix blocks 被保护。"""
+        from bidkv.adapters.vllm.truncation_hook import _single_type_truncate_tail_blocks
+
+        pool = _FakeBlockPool(block_size=16)
+        mgr = _FakeSingleTypeKVCacheManager(pool, block_size=16)
+        # 5 blocks: first 3 shared (ref_cnt=2), last 2 private
+        mgr.add_request_blocks("req-1", 5, shared_prefix=3)
+
+        result = _single_type_truncate_tail_blocks(mgr, "req-1", 5)
+
+        assert result.success is True
+        assert result.actual_freed_blocks == 2  # only non-shared tail
+        assert len(mgr.req_to_blocks["req-1"]) == 3
+
+    def test_single_type_truncate_all_shared(self) -> None:
+        """所有 tail blocks 都是 shared → fallback。"""
+        from bidkv.adapters.vllm.truncation_hook import _single_type_truncate_tail_blocks
+
+        pool = _FakeBlockPool(block_size=16)
+        mgr = _FakeSingleTypeKVCacheManager(pool, block_size=16)
+        mgr.add_request_blocks("req-1", 3, shared_prefix=3)
+
+        result = _single_type_truncate_tail_blocks(mgr, "req-1", 2)
+
+        assert result.success is False
+        assert result.fallback_required is True
+        assert "ref_cnt" in result.reason
+
+    def test_single_type_truncate_missing_request(self) -> None:
+        """请求不存在 → fallback。"""
+        from bidkv.adapters.vllm.truncation_hook import _single_type_truncate_tail_blocks
+
+        pool = _FakeBlockPool(block_size=16)
+        mgr = _FakeSingleTypeKVCacheManager(pool, block_size=16)
+
+        result = _single_type_truncate_tail_blocks(mgr, "req-missing", 2)
+
+        assert result.success is False
+        assert result.fallback_required is True
+
+    def test_install_truncation_support_idempotent(self) -> None:
+        """install_truncation_support 多次调用幂等。"""
+        from bidkv.adapters.vllm.truncation_hook import install_truncation_support
+
+        kv_mgr = _FakeKVCacheManager(block_size=16, num_blocks_per_request=3)
+        install_truncation_support(kv_mgr)
+        assert hasattr(kv_mgr, "truncate_request_tail")
+
+        # Second call should not error
+        install_truncation_support(kv_mgr)
+        assert hasattr(kv_mgr, "truncate_request_tail")
+
+    def test_install_truncation_support_callable(self) -> None:
+        """安装后 truncate_request_tail 可调用。"""
+        from bidkv.adapters.vllm.truncation_hook import install_truncation_support
+
+        kv_mgr = _FakeKVCacheManager(block_size=16, num_blocks_per_request=5)
+        kv_mgr.add_request("req-1")
+        install_truncation_support(kv_mgr)
+
+        result = kv_mgr.truncate_request_tail("req-1", 2)
+
+        assert result.success is True
+        assert result.actual_freed_blocks == 2
