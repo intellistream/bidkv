@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **GlobalNoBid 策略修复：多级 compression levels + 正确的贪心选择**:
+  - 根因：旧实现仅使用单一 `compressible_ratio=0.6`，H2O positional heuristic 下 delta≈0.22 永远超过 `delta_budget=0.15`，导致 `select_victims()` 始终返回空列表（0 truncations）
+  - 修复：引入与 BidKV 相同的 `compression_levels=(0.2, 0.4, 0.6)`，为每个 candidate × 每个 level 生成 option，混合按 utility 贪心选择
+  - 保持归因纯净：GlobalNoBid 与 BidKV 唯一差异 = 无 BidPool/Solver 协议（系统直接推断 vs 用户显式 bid）
+  - 约束对齐：约束 A（每 request 最多 1 bid）+ 约束 B（Σδ ≤ budget）与 GreedyBidSolver 完全一致
+  - 465 tests passing, ruff clean
+
 ### Removed
 
 - **Mode A (recompute_fallback) 彻底移除**:

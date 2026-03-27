@@ -316,8 +316,9 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
     victim_id: str | None = None
     diag_detail = ""
 
-    if strategy is not None and strategy_name != "bidkv":
-        # Route through baseline strategy's select_victims()
+    if strategy is not None:
+        # Route ALL strategies (including BidKV) through select_victims()
+        # for clean ablation: each strategy is evaluated by its own logic.
         pairs = _build_running_candidates(running, adapter)
         candidates = [p[0] for p in pairs]
         if candidates:
@@ -326,7 +327,7 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
                 victim_id = actions[0].request_id
                 diag_detail = f"strategy={strategy_name}"
     else:
-        # BidKV / default: use completion-aware keep_score
+        # No strategy set (standalone adapter): use completion-aware keep_score
         best_victim = None
         best_score = float("inf")
         for req in running:
