@@ -104,10 +104,12 @@ class TestFeatureOff:
     """Feature OFF 时所有操作为 no-op。"""
 
     def test_try_compress_returns_zero(self, inactive_adapter: SGLangAdapter) -> None:
-        assert inactive_adapter.try_compress() == 0
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            assert inactive_adapter.try_compress() == 0
 
     def test_execute_compression_returns_zero(self, inactive_adapter: SGLangAdapter) -> None:
-        assert inactive_adapter.execute_compression("req-1", 100) == 0
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            assert inactive_adapter.execute_compression("req-1", 100) == 0
 
     def test_get_kv_stats_no_scheduler(self, inactive_adapter: SGLangAdapter) -> None:
         assert inactive_adapter.get_kv_stats() == (0, 0)
@@ -124,7 +126,8 @@ class TestPressureCompression:
     def test_no_pressure_no_compression(self, active_adapter: SGLangAdapter) -> None:
         """无压力时 try_compress 返回 0。"""
         # KV stats 为 (0, 0)（无 scheduler），不触发压力
-        result = active_adapter.try_compress()
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            result = active_adapter.try_compress()
         assert result == 0
 
     def test_pressure_triggers_bid_generation(self, active_adapter: SGLangAdapter) -> None:
@@ -205,7 +208,8 @@ class TestSharedPrefixProtection:
         # 执行压缩（无 scheduler，不会实际调用框架 API）
         # execute_compression 内部会跳过共享位置
         # 因为没有 scheduler，实际释放为 0，但逻辑路径正确
-        freed = active_adapter.execute_compression("req-1", 10)
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            freed = active_adapter.execute_compression("req-1", 10)
         # 没有 scheduler 所以返回 0 是正常的
         assert freed == 0
 
@@ -234,7 +238,8 @@ class TestKillSwitch:
 
         assert not active_adapter.config.is_active
         assert not active_adapter.pool_manager.is_active
-        assert active_adapter.try_compress() == 0
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            assert active_adapter.try_compress() == 0
         assert active_adapter.metrics.kill_switch_activations == 1
 
     def test_deactivate_kill_switch(self, active_adapter: SGLangAdapter) -> None:
@@ -347,7 +352,7 @@ class TestSchedulerHook:
 
         install_scheduler_hook(scheduler, adapter)
 
-        # 调用 patched 方法
+        # 调用 patched 方法 — Mode A hook 会调用原始方法
         result = scheduler.get_next_batch_to_run()
         assert result == "batch"
         assert "original" in call_log
@@ -391,19 +396,21 @@ class TestSchedulerHook:
             solver_config=SolverConfig(enabled=True),
         )
 
+        original_fn = scheduler.get_next_batch_to_run
         install_scheduler_hook(scheduler, adapter)
 
-        # patched method 应有 __wrapped__ 属性
+        # patched method should be different from original
         patched = scheduler.get_next_batch_to_run
-        assert hasattr(patched, "__wrapped__"), "patched method must have __wrapped__"
-        # patched 不是原始方法（是闭包）
+        assert patched is not original_fn
+        # Patched still returns correct result
         assert patched() == "original"
 
         # uninstall 应恢复原始方法
         uninstall_scheduler_hook(scheduler)
         restored = scheduler.get_next_batch_to_run
-        assert not hasattr(restored, "__wrapped__"), "restored method should not have __wrapped__"
         assert restored() == "original"
+        # Should not have _bidkv_ attributes anymore
+        assert not hasattr(scheduler, "_bidkv_orig_get_next_batch_to_run")
 
 
 # ===========================================================================
@@ -538,7 +545,8 @@ class TestBaselineRouting:
         # _try_compress_baseline is called (not the bid pipeline)
         # Without scheduler, execute_compression returns 0, so total_freed=0
         # but it should not raise errors
-        result = adapter._try_compress_baseline(900, 1000, 50)
+        with pytest.warns(DeprecationWarning, match="deprecated"):
+            result = adapter._try_compress_baseline(900, 1000, 50)
         assert result == 0  # no scheduler → execute_compression returns 0
 
     def test_bidkv_name_uses_full_pipeline(
@@ -559,3 +567,188 @@ class TestBaselineRouting:
         )
         # Even with experiment_strategy set, name=bidkv means full pipeline
         assert adapter._experiment_strategy_name == "bidkv"
+
+
+# ===========================================================================
+# Test: Mode A Request-Level Scheduling
+# ===========================================================================
+
+
+class TestModeAScheduling:
+    """Mode A request-level 调度测试（对称 vLLM Mode A）。"""
+
+    def test_adapter_has_mode_a_attributes(self, active_adapter: SGLangAdapter) -> None:
+        """adapter 包含 Mode A 所需的属性。"""
+        assert hasattr(active_adapter, "_cached_preempt_priority")
+        assert hasattr(active_adapter, "_last_priority_refresh")
+        assert hasattr(active_adapter, "_request_arrival_ms")
+        assert active_adapter._cached_preempt_priority == {}
+        assert active_adapter._last_priority_refresh == 0.0
+        assert active_adapter._request_arrival_ms == {}
+
+    def test_scheduler_hook_mode_a_flow(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """Mode A hook: get_next_batch_to_run 完整流程。"""
+        from bidkv.adapters.sglang.scheduler_hook import install_scheduler_hook
+
+        call_log: list[str] = []
+
+        class FakeReq:
+            def __init__(self, rid: str, prompt_len: int = 100) -> None:
+                self.rid = rid
+                self.request_id = rid
+                self.num_prompt_tokens = prompt_len
+                self.origin_input_ids = list(range(prompt_len))
+
+        class FakeScheduler:
+            waiting_queue: list[object] = []
+            running_batch = None
+
+            def get_next_batch_to_run(self) -> str:
+                call_log.append("original")
+                return "batch"
+
+        scheduler = FakeScheduler()
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            scheduler=scheduler,
+            pressure_config=PressureConfig(enabled=True),
+            solver_config=SolverConfig(enabled=True),
+        )
+
+        install_scheduler_hook(scheduler, adapter)
+        result = scheduler.get_next_batch_to_run()
+        assert result == "batch"
+        assert "original" in call_log
+
+    def test_waiting_reorder_fcfs_for_default(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """sglang_default: waiting 队列不重排（FCFS）。"""
+        from bidkv.adapters.sglang.scheduler_hook import _reorder_waiting_for_admission
+
+        class FakeReq:
+            def __init__(self, rid: str, prompt_len: int) -> None:
+                self.rid = rid
+                self.num_prompt_tokens = prompt_len
+
+        class FakeScheduler:
+            waiting_queue: list[object]
+
+        scheduler = FakeScheduler()
+        scheduler.waiting_queue = [FakeReq("a", 200), FakeReq("b", 50), FakeReq("c", 100)]
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy_name="sglang_default",
+        )
+
+        _reorder_waiting_for_admission(scheduler, adapter)
+        # FCFS: order unchanged
+        ids = [r.rid for r in scheduler.waiting_queue]
+        assert ids == ["a", "b", "c"]
+
+    def test_waiting_reorder_sjf_for_bidkv(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """bidkv: waiting 按 prompt_tokens SJF 排序。"""
+        from bidkv.adapters.sglang.scheduler_hook import _reorder_waiting_for_admission
+
+        class FakeReq:
+            def __init__(self, rid: str, prompt_len: int) -> None:
+                self.rid = rid
+                self.num_prompt_tokens = prompt_len
+
+        class FakeScheduler:
+            waiting_queue: list[object]
+
+        scheduler = FakeScheduler()
+        scheduler.waiting_queue = [FakeReq("a", 200), FakeReq("b", 50), FakeReq("c", 100)]
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy_name="bidkv",
+        )
+
+        _reorder_waiting_for_admission(scheduler, adapter)
+        ids = [r.rid for r in scheduler.waiting_queue]
+        assert ids == ["b", "c", "a"]  # SJF: 50 < 100 < 200
+
+    def test_running_reorder_skipped_for_default(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """sglang_default: running 列表不重排。"""
+        from bidkv.adapters.sglang.scheduler_hook import _reorder_running_for_preemption
+
+        class FakeReq:
+            def __init__(self, rid: str) -> None:
+                self.rid = rid
+
+        class FakeBatch:
+            def __init__(self, reqs: list[object]) -> None:
+                self.reqs = reqs
+
+        class FakeScheduler:
+            running_batch: object
+
+        scheduler = FakeScheduler()
+        scheduler.running_batch = FakeBatch([FakeReq("a"), FakeReq("b"), FakeReq("c")])
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy_name="sglang_default",
+        )
+
+        original_order = [r.rid for r in scheduler.running_batch.reqs]
+        _reorder_running_for_preemption(scheduler, adapter)
+        new_order = [r.rid for r in scheduler.running_batch.reqs]
+        assert original_order == new_order
+
+    def test_priority_cache_populated(
+        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+    ) -> None:
+        """策略 refresh 后 _cached_preempt_priority 被填充。"""
+        from bidkv.adapters.sglang.scheduler_hook import _refresh_priority_cache
+        from bidkv.baselines import BaselineRegistry
+
+        registry = BaselineRegistry()
+        registry.create_default_registry()
+        strategy = registry.get("slack-aware")
+
+        class FakeReq:
+            def __init__(self, rid: str, tokens: int) -> None:
+                self.rid = rid
+                self.request_id = rid
+                self.num_prompt_tokens = tokens
+                self.num_computed_tokens = tokens
+                self.num_preemptions = 0
+                self.origin_input_ids = list(range(tokens))
+                self.sampling_params = None
+
+        class FakeBatch:
+            def __init__(self, reqs: list[object]) -> None:
+                self.reqs = reqs
+
+        class FakeScheduler:
+            running_batch: object
+
+        scheduler = FakeScheduler()
+        scheduler.running_batch = FakeBatch([FakeReq("a", 100), FakeReq("b", 200)])
+
+        adapter = SGLangAdapter(
+            config=active_config,
+            scoring=h2o_scoring,
+            experiment_strategy=strategy,
+            experiment_strategy_name="slack_aware",
+        )
+        # Track requests
+        adapter.track_request("a", list(range(100)))
+        adapter.track_request("b", list(range(200)))
+
+        _refresh_priority_cache(scheduler, adapter)
+        assert len(adapter._cached_preempt_priority) >= 2

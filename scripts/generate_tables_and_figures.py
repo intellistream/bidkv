@@ -251,15 +251,15 @@ def generate_rate_table(rows: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 # Figure generation
 # ---------------------------------------------------------------------------
-def _bidkv_advantage_text(rows: list[dict], rate: float, metric: str,
-                          lower_better: bool = True) -> str:
+def _bidkv_advantage_text(
+    rows: list[dict], rate: float, metric: str, lower_better: bool = True
+) -> str:
     """Compute BidKV advantage vs worst baseline for annotation."""
     rate_rows = {r["strategy"]: r for r in rows if r["rate"] == rate}
     if "bidkv" not in rate_rows:
         return ""
     bv = rate_rows["bidkv"][metric]
-    others = {s: rate_rows[s][metric] for s in STRATEGIES_ORDER
-              if s in rate_rows and s != "bidkv"}
+    others = {s: rate_rows[s][metric] for s in STRATEGIES_ORDER if s in rate_rows and s != "bidkv"}
     if not others:
         return ""
     if lower_better:
@@ -282,9 +282,10 @@ def generate_fig1(rows: list[dict]) -> None:
     """Figure 1: Visual main comparison at rate=0.5 (multi-panel bar chart)."""
     try:
         import matplotlib
+
         matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
     except ImportError:
         print("ERROR: matplotlib not available. Skipping fig1.", file=sys.stderr)
         return
@@ -294,8 +295,7 @@ def generate_fig1(rows: list[dict]) -> None:
     rate = 0.5
     rate_rows = {r["strategy"]: r for r in rows if r["rate"] == rate}
     strats = [s for s in STRATEGIES_ORDER if s in rate_rows]
-    labels = [STRATEGY_DISPLAY.get(s, s).replace(r"\textbf{", "").replace("}", "")
-              for s in strats]
+    labels = [STRATEGY_DISPLAY.get(s, s).replace(r"\textbf{", "").replace("}", "") for s in strats]
     n = len(strats)
 
     bar_colors = ["#d62728" if s == "bidkv" else "#4c72b0" for s in strats]
@@ -309,7 +309,7 @@ def generate_fig1(rows: list[dict]) -> None:
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
 
-    for ax, (ylabel, key, lower_better) in zip(axes, metrics):
+    for ax, (ylabel, key, lower_better) in zip(axes, metrics, strict=False):
         vals = []
         for s in strats:
             v = rate_rows[s][key]
@@ -317,8 +317,7 @@ def generate_fig1(rows: list[dict]) -> None:
                 v = v / 1000  # convert ms → s
             vals.append(v)
 
-        bars = ax.bar(range(n), vals, color=bar_colors, edgecolor=edge_colors,
-                      linewidth=0.8, alpha=0.9)
+        ax.bar(range(n), vals, color=bar_colors, edgecolor=edge_colors, linewidth=0.8, alpha=0.9)
         ax.set_xticks(range(n))
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel(ylabel, fontsize=10)
@@ -328,9 +327,15 @@ def generate_fig1(rows: list[dict]) -> None:
         bidkv_idx = strats.index("bidkv") if "bidkv" in strats else None
         if bidkv_idx is not None:
             bv = vals[bidkv_idx]
-            ax.annotate(f"{bv:.1f}", xy=(bidkv_idx, bv),
-                        ha="center", va="bottom", fontsize=9, fontweight="bold",
-                        color="#d62728")
+            ax.annotate(
+                f"{bv:.1f}",
+                xy=(bidkv_idx, bv),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#d62728",
+            )
 
         # Compute BidKV advantage annotation
         if bidkv_idx is not None:
@@ -341,10 +346,12 @@ def generate_fig1(rows: list[dict]) -> None:
                 wv = other_vals[worst_s]
                 if wv > 0:
                     pct = (wv - bv) / wv * 100
-                    wname = STRATEGY_DISPLAY.get(worst_s, worst_s).replace(
-                        r"\textbf{", "").replace("}", "")
-                    ax.set_title(f"{ylabel}\nBidKV vs {wname}: -{pct:.0f}%",
-                                 fontsize=9)
+                    wname = (
+                        STRATEGY_DISPLAY.get(worst_s, worst_s)
+                        .replace(r"\textbf{", "")
+                        .replace("}", "")
+                    )
+                    ax.set_title(f"{ylabel}\nBidKV vs {wname}: -{pct:.0f}%", fontsize=9)
                 else:
                     ax.set_title(ylabel, fontsize=9)
             else:
@@ -352,18 +359,21 @@ def generate_fig1(rows: list[dict]) -> None:
                 wv = other_vals[worst_s]
                 if wv > 0:
                     pct = (bv - wv) / wv * 100
-                    wname = STRATEGY_DISPLAY.get(worst_s, worst_s).replace(
-                        r"\textbf{", "").replace("}", "")
-                    ax.set_title(f"{ylabel}\nBidKV vs {wname}: +{pct:.0f}%",
-                                 fontsize=9)
+                    wname = (
+                        STRATEGY_DISPLAY.get(worst_s, worst_s)
+                        .replace(r"\textbf{", "")
+                        .replace("}", "")
+                    )
+                    ax.set_title(f"{ylabel}\nBidKV vs {wname}: +{pct:.0f}%", fontsize=9)
                 else:
                     ax.set_title(ylabel, fontsize=9)
 
     # Legend
     bidkv_patch = mpatches.Patch(color="#d62728", label="BidKV")
     other_patch = mpatches.Patch(color="#4c72b0", label="Baselines")
-    fig.legend(handles=[bidkv_patch, other_patch], loc="upper center",
-               ncol=2, fontsize=9, frameon=False)
+    fig.legend(
+        handles=[bidkv_patch, other_patch], loc="upper center", ncol=2, fontsize=9, frameon=False
+    )
 
     fig.suptitle("Main Comparison (rate=0.5, long-context, vLLM)", fontsize=12, y=1.02)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -456,8 +466,7 @@ def generate_figures(rows: list[dict]) -> None:
     ax1.legend(fontsize=7, loc="upper left")
     # BidKV advantage annotation at highest rate
     adv = _bidkv_advantage_text(rows, 0.7, "ttft_p95", lower_better=True)
-    ax1.set_title(f"(a) TTFT P95 vs Rate\n{adv}" if adv else "(a) TTFT P95 vs Rate",
-                  fontsize=9)
+    ax1.set_title(f"(a) TTFT P95 vs Rate\n{adv}" if adv else "(a) TTFT P95 vs Rate", fontsize=9)
 
     ax2.set_xlabel("Request Rate (req/s)")
     ax2.set_ylabel("Throughput (req/s)")
@@ -496,8 +505,7 @@ def generate_figures(rows: list[dict]) -> None:
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=7)
     adv = _bidkv_advantage_text(rows, 0.5, "slo_attainment", lower_better=False)
-    ax.set_title(f"SLO Attainment vs Rate\n{adv}" if adv else "SLO Attainment vs Rate",
-                 fontsize=9)
+    ax.set_title(f"SLO Attainment vs Rate\n{adv}" if adv else "SLO Attainment vs Rate", fontsize=9)
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig3b_slo_attainment.pdf", bbox_inches="tight", dpi=150)
     plt.close(fig)

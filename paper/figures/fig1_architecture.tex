@@ -4,6 +4,7 @@
 % Layout: four layers stacked bottom-to-top by abstraction level.
 % Left arrows (blue, upward)  = invocation / trigger flow
 % Right arrows (orange, downward) = data / result flow
+% Updated for preemption scheduling narrative (v2)
 
 \begin{figure}[t]
 \centering
@@ -21,7 +22,7 @@
 % Layer 4 — Runtime Adapter (bottom)
 \node[layer, fill=blue!8] (L4) at (0, 0)
   {\textbf{Runtime Adapter Layer}\\[1pt]
-   {\footnotesize vLLM\;\textbar\;SGLang — pressure detect, execute}};
+   {\footnotesize vLLM\;\textbar\;SGLang — pressure detect, preempt}};
 
 % Layer 3 — Scoring-to-Bid
 \node[layer, fill=green!8] (L3) at (0, 1.7)
@@ -57,7 +58,7 @@
 \draw[dataarrow] ([xshift=5mm]L2.south) -- ([xshift=5mm]L3.north east |- L2.south)
   node[midway, right, lbl] {BidAcceptance};
 \draw[dataarrow] ([xshift=5mm]L2.south |- L4.north) -- ([xshift=5mm]L4.north)
-  node[midway, right, lbl] {\textcolor{orange!70!black}{\ding{174}} execute};
+  node[midway, right, lbl] {\textcolor{orange!70!black}{\ding{174}} preempt};
 
 % ---- Section annotations (far right) ----
 \node[font=\scriptsize, text=gray, anchor=west] at (3.8, 0)    {\S5};

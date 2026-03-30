@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **vLLM scheduler_hook: add missing `_proactive_preempt()` call in `_patched_schedule()`**:
+  - `_proactive_preempt()` was defined (line 433) but never called from the main schedule flow,
+    making slack-aware lose its only proactive preemption mechanism (SRPT already excluded for
+    EDF discipline). Now called before `_proactive_srpt()` in `_patched_schedule()`.
+  - Effect: slack-aware now has proactive preemption at KV > 90% (5s cooldown), as specified
+    in the strategy differentiation table.
+  - SJF strategies also get `_proactive_preempt()` in addition to SRPT (harmless: SRPT fires
+    more aggressively at KV > 80% with 1.5s cooldown, so proactive_preempt is rarely additive).
+  - **Bug fix**: Added `prev_step_scheduled_req_ids.discard(victim_id)` after preemption in
+    `_proactive_preempt()` — same fix already present in `_proactive_srpt()`. Without this,
+    vLLM's `_make_cached_request_data()` hits `assert not scheduled_in_prev_step`, crashing
+    the EngineCore subprocess.
+
 ### Changed
 
 - **SGLang adapter: token-level → request-level Mode A scheduling**:

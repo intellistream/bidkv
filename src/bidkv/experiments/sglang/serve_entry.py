@@ -112,8 +112,10 @@ def main() -> None:
     strategy = os.environ.get("BIDKV_STRATEGY", "sglang_default")
     logger.info("SGLang BidKV entry point: strategy=%s", strategy)
 
-    if strategy != "sglang_default":
-        _patch_sglang_scheduler(strategy)
+    # ALL strategies install hooks for fair comparison.
+    # sglang_default hooks do FCFS (no reorder) — identical to vanilla SGLang
+    # scheduling, but with the same infrastructure overhead for fairness.
+    _patch_sglang_scheduler(strategy)
 
     # 启动 SGLang server
     import runpy

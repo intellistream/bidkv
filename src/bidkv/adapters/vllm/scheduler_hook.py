@@ -522,6 +522,13 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
         running.append(best_victim_req)
         return
 
+    # Remove from prev_step_scheduled_req_ids so that when orig() picks up
+    # this request from waiting as "resumed", the assertion at
+    # scheduler.py:1051 (assert not scheduled_in_prev_step) won't fire.
+    prev_ids = getattr(scheduler, "prev_step_scheduled_req_ids", None)
+    if prev_ids is not None:
+        prev_ids.discard(victim_id)
+
     scheduler._bidkv_last_proactive = now
     adapter._metrics.record_compression(victim_id, freed_estimate)
     _diag(
@@ -718,9 +725,10 @@ def _patched_schedule(scheduler: Any, adapter: VLLMAdapter) -> Any:
     2. Track waiting arrival times
     3. Reorder waiting queue by strategy-specific SJF key
     4. Refresh preemption priority cache (select_victims)
-    5. Proactive SRPT preemption (bidkv + global-nobid only)
-    6. Reorder running list (strategy-specific victim ordering)
-    7. Call original schedule()
+    5. Proactive preemption via cached priority (all except preempt-evict)
+    6. Proactive SRPT preemption (SJF strategies, excludes slack-aware)
+    7. Reorder running list (strategy-specific victim ordering)
+    8. Call original schedule()
 
     Strategy differentiation hierarchy:
     - preempt-evict: FCFS admission + LIFO preemption (true vLLM default)
@@ -764,7 +772,13 @@ def _patched_schedule(scheduler: Any, adapter: VLLMAdapter) -> Any:
     # Calls strategy.select_victims() to rank running requests
     _refresh_priority_cache(scheduler, adapter)
 
-    # Proactive SRPT preemption (all SJF strategies)
+    # Proactive preemption using cached priority (all except preempt-evict)
+    # Uses select_victims() priority to pick victim when KV > 90%.
+    # This is the ONLY proactive mechanism for slack-aware (SRPT excluded
+    # because it conflicts with EDF discipline).
+    _proactive_preempt(scheduler, adapter)
+
+    # Proactive SRPT preemption (all SJF strategies, excludes slack-aware)
     # Preempt high-remaining-cost running request when a low-cost
     # waiting request could be served instead. All strategies use
     # the same cost estimation; BidKV differs in prior eviction quality.

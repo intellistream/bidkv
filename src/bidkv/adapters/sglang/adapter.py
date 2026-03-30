@@ -1,19 +1,19 @@
 """SGLangAdapter — BidKV 在 SGLang 框架上的适配器。
 
-SGLang 的 RadixAttention 天然支持部分 KV 释放（tree node invalidation），
-比 vLLM 更适合 BidKV 的细粒度压缩。
+**Mode A 架构（request-level 调度，对称 vLLM Mode A）**：
+BidKV 在 SGLang 上的角色是 **请求调度插件**——控制 WHO gets evicted，
+执行机制是 SGLang 原生 eviction/abort。不做 token-level 部分释放。
 
 核心职责：
 1. KV stats 获取：从 ``TokenToKVPool`` 读取 used/total
-2. Pressure interception：在 RadixAttention LRU 驱逐前获得压缩尝试机会
-3. Compression 执行：通过 radix tree 节点级缩减释放 KV
-4. Scoring 回调：decode step 后更新评分策略
-5. Lifecycle 管理：请求完成时清理 bid 和前缀追踪
+2. Request-level 调度：通过 scheduler_hook 在 ``get_next_batch_to_run()``
+   前重排 waiting/running queue，影响 SGLang 原生的 admission 和 eviction
+3. Scoring 回调：decode step 后更新评分策略
+4. Lifecycle 管理：请求完成时清理 bid 和前缀追踪
 
-共享前缀保护：
-- 检查 token 是否被多个请求共享（radix tree ref count > 1）
-- 共享 token 不可压缩（跳过）
-- 仅压缩请求独有的 token
+.. deprecated::
+    Token-level 方法（execute_compression, try_compress 等）已标记为 DEPRECATED
+    (Mode B)——在 Mode A 实验中为死代码。保留用于 Mode B 扩展（issue #054）。
 """
 
 from __future__ import annotations
@@ -42,11 +42,11 @@ DEFAULT_COMPRESSION_LEVELS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
 
 
 class SGLangAdapter(FrameworkAdapter):
-    """BidKV 在 SGLang 框架上的适配器。
+    """BidKV 在 SGLang 框架上的适配器（Mode A request-level 调度）。
 
-    利用 SGLang 的 RadixAttention 树状 KV 管理进行细粒度压缩。
-    SGLang 天然支持 token-level prefix sharing 和节点级 KV 释放，
-    使 BidKV 能在比 vLLM 更细的粒度上操作。
+    通过 scheduler_hook monkey-patch SGLang Scheduler 的
+    ``get_next_batch_to_run()``，在 native batch selection 前执行
+    request-level 调度决策（waiting/running 重排 + proactive preemption）。
 
     Parameters
     ----------
@@ -108,6 +108,11 @@ class SGLangAdapter(FrameworkAdapter):
         # 原始方法备份（用于 uninstall）
         self._original_methods: dict[str, Any] = {}
 
+        # Mode A: request-level scheduling state
+        self._cached_preempt_priority: dict[str, float] = {}
+        self._last_priority_refresh: float = 0.0
+        self._request_arrival_ms: dict[str, float] = {}
+
         # Metrics（与 vLLM adapter 对齐，便于跨框架对比）
         self._metrics = _AdapterMetrics()
 
@@ -152,10 +157,10 @@ class SGLangAdapter(FrameworkAdapter):
     # ------------------------------------------------------------------
 
     def install(self) -> None:
-        """将 bidkv 注入到 SGLang 调度路径。
+        """将 bidkv request-level 调度注入到 SGLang 调度路径。
 
-        需要先设置 scheduler。注入后，在 SGLang 的 eviction path 前
-        会先尝试 bidkv 压缩。
+        需要先设置 scheduler。注入后，scheduler_hook 在每次
+        ``get_next_batch_to_run()`` 前执行 request-level 调度。
 
         Raises
         ------
@@ -208,12 +213,10 @@ class SGLangAdapter(FrameworkAdapter):
         return (used, total)
 
     def execute_compression(self, request_id: str, target_tokens: int) -> int:
-        """在 SGLang 中执行 KV 压缩（radix tree 节点级缩减）。
+        """[DEPRECATED — Mode B] 在 SGLang 中执行 KV 压缩（radix tree 节点级缩减）。
 
-        SGLang 的 RadixAttention 支持按节点粒度释放 KV，
-        比 vLLM 的 block-level 释放更精细。
-
-        共享前缀保护：与其他请求共享的 token（ref count > 1）不被压缩。
+        在 Mode A（request-level 调度）中不使用。
+        保留用于潜在的 Mode B 扩展（issue #054）。
 
         Parameters
         ----------
@@ -227,6 +230,14 @@ class SGLangAdapter(FrameworkAdapter):
         int
             实际释放的 token 数量。
         """
+        import warnings
+
+        warnings.warn(
+            "SGLangAdapter.execute_compression() is deprecated (Mode B). "
+            "Mode A uses request-level scheduling via scheduler_hook.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not self._config.is_active:
             return 0
 
@@ -298,20 +309,25 @@ class SGLangAdapter(FrameworkAdapter):
     # ------------------------------------------------------------------
 
     def try_compress(self) -> int:
-        """执行一轮 BidKV 压缩周期（pressure interception boundary）。
+        """[DEPRECATED — Mode B] 执行一轮 BidKV 压缩周期。
 
-        流程：
-        1. 更新 KV stats → PressureDetector
-        2. 检查是否处于压力态
-        3. 为所有追踪的请求生成/刷新 bids
-        4. Solver 选择最优 bid 组合
-        5. 执行压缩
+        在 Mode A（request-level 调度）中不使用——压力检测和压缩调度
+        由 scheduler_hook 中的 request-level 调度逻辑驱动。
+        保留用于潜在的 Mode B 扩展（issue #054）。
 
         Returns
         -------
         int
             本轮实际释放的总 token 数。0 表示未触发或无需压缩。
         """
+        import warnings
+
+        warnings.warn(
+            "SGLangAdapter.try_compress() is deprecated (Mode B). "
+            "Mode A uses request-level scheduling via scheduler_hook.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not self._config.is_active:
             return 0
 
@@ -368,7 +384,7 @@ class SGLangAdapter(FrameworkAdapter):
             self._pool_manager.submit_bids(request_id, bids)
 
     def _execute_acceptance(self, acceptance: BidAcceptance, pool_snapshot: Any) -> int:
-        """执行 Solver 接受的 bid 组合。"""
+        """[DEPRECATED — Mode B] 执行 Solver 接受的 bid 组合。"""
         total_freed = 0
         for bid_id in acceptance.accepted_bid_ids:
             bid = self._pool_manager.get_bid(bid_id)
@@ -404,7 +420,7 @@ class SGLangAdapter(FrameworkAdapter):
     # ------------------------------------------------------------------
 
     def _try_compress_baseline(self, used: int, total: int, tokens_needed: int) -> int:
-        """Route compression through a BaselineStrategy.select_victims()."""
+        """[DEPRECATED — Mode B] Route compression through a BaselineStrategy."""
         strategy = self._experiment_strategy
         assert strategy is not None
 
@@ -434,7 +450,7 @@ class SGLangAdapter(FrameworkAdapter):
         return states
 
     def _execute_baseline_actions(self, actions: list[CompressionAction]) -> int:
-        """Execute CompressionAction list from a baseline strategy."""
+        """[DEPRECATED — Mode B] Execute CompressionAction list."""
         total_freed = 0
         for action in actions:
             freed = self.execute_compression(action.request_id, action.target_tokens)

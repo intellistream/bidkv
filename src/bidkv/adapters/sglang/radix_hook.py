@@ -1,4 +1,8 @@
-"""RadixAttention 节点级压缩/释放钩子。
+"""[DEPRECATED — Mode B] RadixAttention 节点级压缩/释放钩子。
+
+本模块在 Mode A（request-level 调度）中为死代码。
+Mode A 通过 scheduler_hook 实现 request-level 调度，不做 token-level 部分释放。
+保留用于潜在的 Mode B 扩展（issue #054）。
 
 SGLang 的 RadixAttention 使用 trie 树管理 KV cache，
 每个节点对应一段 token 序列。本模块提供在 radix tree 节点粒度上
