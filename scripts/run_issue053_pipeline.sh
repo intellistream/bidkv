@@ -15,12 +15,13 @@
 #   conda run -n sagellm bash scripts/run_issue053_pipeline.sh
 set -euo pipefail
 
-PYTHON="/home/cyb/.conda/envs/sagellm/bin/python"
-BIDKV_DIR="/home/cyb/bidkv"
-MODEL="/home/cyb/Llama-3.1-8B-Instruct"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONDA_RUN=(conda run -n sagellm python)
+MODEL="${BIDKV_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TRACES="results/formal/traces"
 
-cd "$BIDKV_DIR"
+cd "$REPO_DIR"
 
 echo "=========================================="
 echo "Issue #053 Full Experiment Pipeline"
@@ -35,7 +36,7 @@ echo "[Step 1/4] P2: 4 secondary strategies × mixed (36 runs)"
 echo "Strategies: static-random, uniform, global-nobid, slack-aware"
 echo ""
 
-$PYTHON -m bidkv.experiments.vllm.runner \
+"${CONDA_RUN[@]}" -m bidkv.experiments.vllm.runner \
   --strategies "static-random,uniform,global-nobid,slack-aware" \
   --workloads "mixed" \
   --runs 3 \
@@ -84,7 +85,7 @@ echo ""
 echo "[Step 3/4] SGLang full experiment (3 strategies × 2 workloads × 3 rates × 3 runs = 54)"
 echo ""
 
-$PYTHON -m bidkv.experiments.sglang.runner \
+"${CONDA_RUN[@]}" -m bidkv.experiments.sglang.runner \
   --strategies "sglang_default,slack_aware,bidkv" \
   --workloads "mixed,long_context" \
   --runs 3 \
@@ -106,13 +107,13 @@ echo ""
 
 # vLLM analysis
 echo "Running vLLM analysis..."
-$PYTHON -m bidkv.experiments.vllm.analysis \
+"${CONDA_RUN[@]}" -m bidkv.experiments.vllm.analysis \
   --results-dir results/vllm_full \
   --output-dir results/vllm_full/analysis
 
 # SGLang analysis (with cross-framework comparison)
 echo "Running SGLang analysis..."
-$PYTHON -m bidkv.experiments.sglang.analysis \
+"${CONDA_RUN[@]}" -m bidkv.experiments.sglang.analysis \
   --sglang-results-dir results/sglang_full \
   --vllm-results-dir results/vllm_full \
   --output-dir results/sglang_full/analysis

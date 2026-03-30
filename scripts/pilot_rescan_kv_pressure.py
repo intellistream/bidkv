@@ -33,6 +33,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from bidkv.experiments.common.model import get_default_model
 from bidkv.experiments.vllm.collector import save_run_result
 from bidkv.experiments.vllm.config import ExperimentConfig, VLLMServerConfig
 from bidkv.experiments.vllm.runner import VLLMExperimentRunner
@@ -48,7 +49,7 @@ logger = logging.getLogger("pilot_rescan")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL_PATH = "/home/cyb/Llama-3.1-8B-Instruct"
+MODEL_PATH = get_default_model()
 GPU_MEM = 0.375  # validated: ~1000 KV blocks, peak KV=97.7% at 15 concurrent
 TRACES_DIR = Path("results/pilot/traces")
 OUTPUT_DIR = Path("results/pilot/rescan_kv")

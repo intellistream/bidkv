@@ -4,11 +4,11 @@ Usage
 -----
 # Start with preempt-evict (no BidKV, vanilla vLLM):
 BIDKV_STRATEGY=preempt-evict python -m bidkv.experiments.vllm.serve \
-    --model /home/cyb/Llama-3.1-8B-Instruct --enforce-eager --port 8000
+    --model meta-llama/Llama-3.1-8B-Instruct --enforce-eager --port 8000
 
 # Start with BidKV h2o-style strategy:
 BIDKV_STRATEGY=h2o-style python -m bidkv.experiments.vllm.serve \
-    --model /home/cyb/Llama-3.1-8B-Instruct --enforce-eager --port 8000
+    --model meta-llama/Llama-3.1-8B-Instruct --enforce-eager --port 8000
 
 Hook mechanism
 --------------

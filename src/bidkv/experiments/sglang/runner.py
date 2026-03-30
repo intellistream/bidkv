@@ -7,7 +7,7 @@ python -m bidkv.experiments.sglang.runner \\
     --workloads "mixed,long_context" \\
     --runs 3 \\
     --request-rates "1.0,2.0,4.0" \\
-    --model /home/cyb/Llama-3.1-8B-Instruct \\
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --output-dir results/sglang_$(date +%%Y%%m%%d)/
 
 运行流程
@@ -32,6 +32,7 @@ import logging
 import time
 from pathlib import Path
 
+from bidkv.experiments.common.model import get_default_model
 from bidkv.experiments.sglang.collector import (
     RequestResult,
     RunResult,
@@ -472,7 +473,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="/home/cyb/Llama-3.1-8B-Instruct",
+        default=get_default_model(),
         help="Model name or path",
     )
     parser.add_argument(

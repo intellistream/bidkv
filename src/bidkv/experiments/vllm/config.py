@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bidkv.experiments.common.model import get_default_model
+
 # 策略名称常量 — 与 BaselineRegistry.name 对齐
 STRATEGY_PREEMPT_EVICT = "preempt-evict"
 STRATEGY_STATIC_RANDOM = "static-random"
@@ -79,7 +81,7 @@ class VLLMServerConfig:
         服务监听端口。
     """
 
-    model: str = "meta-llama/Llama-2-7b-chat-hf"
+    model: str = field(default_factory=get_default_model)
     block_size: int = 16
     max_num_seqs: int = 32
     gpu_memory_utilization: float = 0.85

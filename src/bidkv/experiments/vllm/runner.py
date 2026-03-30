@@ -8,7 +8,7 @@ python -m bidkv.experiments.vllm.runner \
     --workloads "mixed,long_context" \
     --runs 3 \
     --request-rates "1.5,3.0,6.0" \
-    --model /home/cyb/Llama-3.1-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --output-dir results/vllm_$(date +%Y%m%d)/
 
 # 仅运行 preempt-evict 基线（验证实验框架）
@@ -17,7 +17,7 @@ python -m bidkv.experiments.vllm.runner \
     --workloads "mixed" \
     --runs 1 \
     --request-rates "2.0" \
-    --model /home/cyb/Llama-3.1-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --output-dir results/vllm_smoke/
 
 运行流程
@@ -51,6 +51,7 @@ import urllib.request
 from pathlib import Path
 
 from bidkv.baselines import BaselineRegistry
+from bidkv.experiments.common.model import get_default_model
 from bidkv.experiments.vllm.collector import (
     RequestResult,
     RunResult,
@@ -864,7 +865,15 @@ def parse_args(argv: list[str] | None = None) -> tuple[ExperimentConfig, bool]:
         default="experiments/vllm/traces",
         help="Frozen workload traces directory.",
     )
-    parser.add_argument("--model", type=str, default="/home/cyb/Llama-3.1-8B-Instruct")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=get_default_model(),
+        help=(
+            "Model name or local path. Defaults to the BIDKV_MODEL environment "
+            f"variable when set, otherwise {get_default_model()}."
+        ),
+    )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--block-size", type=int, default=16)

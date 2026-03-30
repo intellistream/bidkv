@@ -31,7 +31,7 @@ fi
 CONDA_RUN="conda run -n sagellm"
 
 # 冻结参数
-MODEL="/home/cyb/Llama-3.1-8B-Instruct"
+MODEL="${BIDKV_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TRACES_DIR="results/formal/traces"
 VLLM_P1_DIR="results/vllm_full_p1"
 VLLM_P2_DIR="results/vllm_full_p2"

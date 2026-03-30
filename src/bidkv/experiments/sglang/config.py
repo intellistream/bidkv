@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bidkv.experiments.common.model import get_default_model
+
 # ── 策略（v2.3 冻结版本）─────────────────────────────────────────
 STRATEGY_SGLANG_DEFAULT = "sglang_default"  # SGLang native (= Preempt-Evict)
 STRATEGY_SLACK_AWARE = "slack_aware"  # 强无-bid 系统对手
@@ -81,7 +83,7 @@ class SGLangServerConfig:
         监听端口。
     """
 
-    model: str = "/home/cyb/Llama-3.1-8B-Instruct"
+    model: str = field(default_factory=get_default_model)
     mem_fraction_static: float = 0.85
     max_total_tokens: int = 16384
     host: str = "127.0.0.1"

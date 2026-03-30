@@ -7,6 +7,11 @@ vLLM (#047) 和 SGLang (#048) 实验均使用本模块。
 from __future__ import annotations
 
 from bidkv.experiments.common.audit import AuditLogger, PressureEventAudit
+from bidkv.experiments.common.model import (
+    DEFAULT_MODEL_ENV_VAR,
+    DEFAULT_MODEL_NAME,
+    get_default_model,
+)
 from bidkv.experiments.common.report import ExperimentReport, RunResult
 from bidkv.experiments.common.runner import BaseExperimentRunner, ExperimentConfig
 from bidkv.experiments.common.trace import FrozenTrace, TraceEntry, load_trace
@@ -14,11 +19,14 @@ from bidkv.experiments.common.trace import FrozenTrace, TraceEntry, load_trace
 __all__ = [
     "AuditLogger",
     "BaseExperimentRunner",
+    "DEFAULT_MODEL_ENV_VAR",
+    "DEFAULT_MODEL_NAME",
     "ExperimentConfig",
     "ExperimentReport",
     "FrozenTrace",
     "PressureEventAudit",
     "RunResult",
     "TraceEntry",
+    "get_default_model",
     "load_trace",
 ]

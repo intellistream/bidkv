@@ -6,7 +6,7 @@ with 50% request count (seed=99) to find rate_low / rate_mid / rate_high for eac
 Usage
 -----
 conda run -n sagellm python -m bidkv.experiments.vllm.pilot_calibration \
-    --model /home/cyb/Llama-3.1-8B-Instruct \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --gpu-memory-utilization 0.85
 """
 
@@ -18,6 +18,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from bidkv.experiments.common.model import get_default_model
 from bidkv.experiments.vllm.collector import RunResult
 from bidkv.experiments.vllm.config import (
     WORKLOAD_LONG_CONTEXT,
@@ -413,8 +414,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="/home/cyb/Llama-3.1-8B-Instruct",
-        help="Path to model weights.",
+        default=get_default_model(),
+        help="Model name or local path.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
