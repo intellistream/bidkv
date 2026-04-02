@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Long-context workload: cross-rate average
+  (vLLM, 500~req/run, rates 0.35/0.5/0.7\,req/s, mean of 3~runs).
+  Best in \textbf{bold}.
+  \textcolor{red}{\textbf{Data collection in progress.}}}
+\label{tab:long_context}
+\footnotesize
+\begin{tabular}{@{}l c c c c@{}}
+\toprule
+\textbf{Strategy} & \textbf{Goodput} & \textbf{SLO}
+  & \textbf{TTFT P95} & \textbf{Norm Lat} \\
+  & (500\,ms) & (300\,ms) & (ms) & (ms/tok) \\
+\midrule
+PE (default)      & --- & --- & --- & --- \\
+PE-SJF            & --- & --- & --- & --- \\
+Static-Random     & --- & --- & --- & --- \\
+H2O-Style         & --- & --- & --- & --- \\
+Uniform           & --- & --- & --- & --- \\
+Slack-Aware       & --- & --- & --- & --- \\
+\textbf{BidKV}    & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}

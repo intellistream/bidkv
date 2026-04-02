@@ -40,10 +40,12 @@ def compute_metrics(files: list[str], label: str) -> dict | None:
 
         if run_ttft:
             s = sorted(run_ttft)
-            per_run_stats.append({
-                "p95": s[int(len(s) * 0.95)],
-                "p99": s[int(len(s) * 0.99)],
-            })
+            per_run_stats.append(
+                {
+                    "p95": s[int(len(s) * 0.95)],
+                    "p99": s[int(len(s) * 0.99)],
+                }
+            )
 
     if not all_ttft:
         return None
@@ -74,9 +76,18 @@ def main() -> None:
 
     # --- BidKV variants ---
     groups = [
-        ("bidkv(v9)", sorted(glob.glob("results/vllm_validation_v9/bidkv__mixed__rate5.7__r*.json"))),
-        ("bidkv(v8)", sorted(glob.glob("results/vllm_validation_v8/bidkv__mixed__rate5.7__r*.json"))),
-        ("bidkv(v7)", sorted(glob.glob("results/vllm_validation_v7/bidkv__mixed__rate5.7__r*.json"))),
+        (
+            "bidkv(v9)",
+            sorted(glob.glob("results/vllm_validation_v9/bidkv__mixed__rate5.7__r*.json")),
+        ),
+        (
+            "bidkv(v8)",
+            sorted(glob.glob("results/vllm_validation_v8/bidkv__mixed__rate5.7__r*.json")),
+        ),
+        (
+            "bidkv(v7)",
+            sorted(glob.glob("results/vllm_validation_v7/bidkv__mixed__rate5.7__r*.json")),
+        ),
         ("bidkv(OLD)", sorted(glob.glob(f"{base_dir}/bidkv__mixed__rate5.7__r*.json"))),
     ]
 
@@ -95,7 +106,8 @@ def main() -> None:
 
     # --- Baselines (fresh runs in v7 dir, then old data) ---
     strategies = [
-        "preempt-evict-sjf", "h2o-style",
+        "preempt-evict-sjf",
+        "h2o-style",
     ]
     print("--- Fresh baselines (same day) ---")
     for strat in strategies:
@@ -112,8 +124,12 @@ def main() -> None:
 
     print("\n--- Old baselines (weeks ago) ---")
     all_strategies = [
-        "preempt-evict", "preempt-evict-sjf", "h2o-style",
-        "static-random", "uniform", "slack-aware",
+        "preempt-evict",
+        "preempt-evict-sjf",
+        "h2o-style",
+        "static-random",
+        "uniform",
+        "slack-aware",
     ]
     for strat in all_strategies:
         files = sorted(glob.glob(f"{base_dir}/{strat}__mixed__rate5.7__r*.json"))

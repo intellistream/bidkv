@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Analyze v8 validation experiment results across all available data."""
+
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
+
 
 def load_run(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
+
 
 def percentile(values: list[float], p: float) -> float:
     if not values:
@@ -19,6 +21,7 @@ def percentile(values: list[float], p: float) -> float:
     hi = min(lo + 1, len(s) - 1)
     frac = k - lo
     return s[lo] + frac * (s[hi] - s[lo])
+
 
 def analyze_run(data: dict) -> dict:
     rr = data["request_results"]
@@ -55,13 +58,14 @@ def analyze_run(data: dict) -> dict:
         "tpot_p95": percentile(tpots, 95),
     }
 
+
 def main():
     base = Path("/home/cyb/bidkv")
     # Scan all result directories
     search_dirs = [
         ("v8-new", base / "results" / "vllm_v8_analysis"),
         ("v8-old", base / "results" / "vllm_validation_v8"),
-        ("v7-bl",  base / "results" / "vllm_validation_v7"),
+        ("v7-bl", base / "results" / "vllm_validation_v7"),
     ]
 
     # Group: (strategy, rate) -> list of metrics
@@ -97,6 +101,7 @@ def main():
         strat, rate = key
         runs = groups[key]
         n = len(runs)
+
         def avg(field):
             return sum(r[field] for r in runs) / n
 
@@ -139,6 +144,7 @@ def main():
                 f"{r['ttft_p50']:7.0f} {r['ttft_p95']:7.0f} {r['ttft_p99']:7.0f} "
                 f"{r['tpot_p95']:7.1f}"
             )
+
 
 if __name__ == "__main__":
     main()

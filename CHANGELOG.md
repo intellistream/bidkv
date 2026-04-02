@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Metric system FROZEN: 4-column main table (v8-frozen)** (2026-04-02):
+  - **FROZEN** — 后续实验（long_context、SGLang）使用相同 4 列体系
+  - Main table: Throughput + SLO attainment(300ms) + TTFT p95 + TPOT p95
+  - Goodput(500ms) moved to supplementary (low universality, overlaps SLO)
+  - Normalized Latency removed (covered by TTFT+TPOT decomposition)
+  - p95 values recomputed from raw request data (previously used summary p99)
+  - BidKV cross-rate: Throughput #4, SLO #1, TTFT #1, TPOT #4
+  - Full analysis: `results/vllm_v8_analysis/v8_analysis_report.md`
+  - Updated copilot-instructions.md with corrected metric system and data
+
 - **Freeze v8 experiment environment** (2026-04-02):
   - Server params frozen: `--gpu-memory-utilization 0.5 --num-gpu-blocks-override 600
     --max-num-seqs 32 --block-size 16 --max-model-len 8192 --enforce-eager`

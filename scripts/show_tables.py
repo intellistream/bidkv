@@ -1,4 +1,5 @@
 """Show full data tables for all strategies."""
+
 from __future__ import annotations
 
 import glob
@@ -32,15 +33,20 @@ def avg_runs(paths: list[str]) -> dict | None:
     if not runs:
         return None
     keys = [
-        "success_pct", "tput", "ttft50", "ttft99",
-        "tpot50", "tpot99", "e2e50", "e2e99", "normlat",
+        "success_pct",
+        "tput",
+        "ttft50",
+        "ttft99",
+        "tpot50",
+        "tpot99",
+        "e2e50",
+        "e2e99",
+        "normlat",
     ]
     avg = {}
     for k in keys:
         avg[k] = statistics.mean(r[k] for r in runs)
-    avg["success"] = (
-        f"{statistics.mean(r['success'] for r in runs):.0f}/{runs[0]['total']}"
-    )
+    avg["success"] = f"{statistics.mean(r['success'] for r in runs):.0f}/{runs[0]['total']}"
     avg["n"] = len(runs)
     return avg
 
@@ -56,8 +62,13 @@ def fmt_row(name: str, rate: str, m: dict) -> str:
 
 def main() -> None:
     strats = [
-        "preempt-evict", "preempt-evict-sjf", "static-random",
-        "h2o-style", "uniform", "slack-aware", "bidkv",
+        "preempt-evict",
+        "preempt-evict-sjf",
+        "static-random",
+        "h2o-style",
+        "uniform",
+        "slack-aware",
+        "bidkv",
     ]
 
     header = (
@@ -78,9 +89,7 @@ def main() -> None:
     for rate in [2.0, 3.8, 5.7]:
         rate_s = f"{rate:.1f}"
         for strat in strats:
-            files = glob.glob(
-                f"results/vllm_full_v1/{strat}__mixed__rate{rate}__r*.json"
-            )
+            files = glob.glob(f"results/vllm_full_v1/{strat}__mixed__rate{rate}__r*.json")
             if not files:
                 continue
             m = avg_runs(files)
@@ -91,9 +100,7 @@ def main() -> None:
 
         # v5b
         try:
-            v5 = load(
-                f"results/vllm_validation_v5b_mixed/bidkv__mixed__rate{rate}__r0.json"
-            )
+            v5 = load(f"results/vllm_validation_v5b_mixed/bidkv__mixed__rate{rate}__r0.json")
             v5["success"] = f"{v5['success']}/{v5['total']}"
             print(fmt_row("bidkv (v5b)", rate_s, v5))
         except FileNotFoundError:
@@ -111,9 +118,7 @@ def main() -> None:
     for rate in [0.35, 0.5, 0.7]:
         rate_s = f"{rate:.2f}"
         for strat in strats:
-            files = glob.glob(
-                f"results/vllm_full_v1/{strat}__long_context__rate{rate}__r*.json"
-            )
+            files = glob.glob(f"results/vllm_full_v1/{strat}__long_context__rate{rate}__r*.json")
             if not files:
                 continue
             m = avg_runs(files)
@@ -124,9 +129,7 @@ def main() -> None:
 
         # v5b
         try:
-            v5 = load(
-                f"results/vllm_validation_v5b/bidkv__long_context__rate{rate}__r0.json"
-            )
+            v5 = load(f"results/vllm_validation_v5b/bidkv__long_context__rate{rate}__r0.json")
             v5["success"] = f"{v5['success']}/{v5['total']}"
             print(fmt_row("bidkv (v5b)", rate_s, v5))
         except FileNotFoundError:

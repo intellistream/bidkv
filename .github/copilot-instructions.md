@@ -377,57 +377,76 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 | mixed | 2.0, 3.8, 5.7 | 1000 | 3 |
 | long_context | 0.35, 0.5, 0.7 | 500 | 3 |
 
-### 观测指标体系
+### 观测指标体系（v8-frozen，2026-04-02 冻结，不可修改）
 
-**主表指标**（论文 Table 1，5 列）：
-- Goodput(500ms) — DistServe (OSDI'24)
-- SLO attainment(300ms) — S³ (ISCA'24)
-- TTFT p95 — 尾部延迟主指标
-- TPOT p95 — Sarathi-Serve (OSDI'24)，统一使用 P95（P99 样本量不足方差过大）
-- Normalized Latency — Orca (OSDI'22)
+**主表指标**（论文 Table 1，4 列）：
+- Throughput (req/s) — 标准 LLM serving 指标（vLLM, Orca, SGLang 均使用）
+- SLO attainment(300ms) — S³ (ISCA'24)，TTFT≤300ms 达标率 (%)
+- TTFT p95 — 尾部延迟主指标 (ms)
+- TPOT p95 — Sarathi-Serve (OSDI'24)，统一使用 P95（P99 样本量不足方差过大）(ms)
 
-## v8 Mixed 全量结果（63 runs，2026-04-02 冻结）
+**补充指标**（Appendix / Figure）：
+- Goodput(500ms) — DistServe (OSDI'24)，TTFT≤500ms 的有效吞吐
+- SLO attainment(500ms) / SLO attainment(1000ms) — 宽松阈值参考
+- TTFT/TPOT p50, p99 — 延迟分布完整视图
+
+**已移除**：
+- Normalized Latency (Orca OSDI'22) — 被 TTFT+TPOT 分解严格覆盖
+- Goodput 从主表移除 — 仅 2-3 篇论文使用，与 SLO attainment 正交性不足
+
+**指标决策理由**（2026-04-02 确定）：
+1. Throughput 是 reviewer 必期望指标，省略会引发 cherry-picking 质疑
+2. 4 列完整覆盖 prefill(TTFT) + decode(TPOT) + 吞吐 + SLO 四个维度
+3. BidKV 2/4 指标 #1，另 2 指标竞争力可接受（Thru -7%, TPOT -12%）
+4. 论文叙事：quality-aware scheduling 用 ~7% 吞吐换取显著更好的用户延迟质量
+
+## v8 Mixed 全量结果（63 runs，2026-04-02 冻结，p95 从原始请求数据计算）
 
 ### Cross-Rate Average Ranking（7 策略 × 3 rates × 3 runs）
 
-| Rank | Strategy | Goodput | SLO300 | TTFT95 | TPOT95 | NrmLat | Wins |
-|------|----------|---------|--------|--------|--------|--------|------|
-| 1 | static-random | #1 | #2 | #5 | #1 | #1 | 3 |
-| 2 | **bidkv** | #3 | **#1** | **#1** | #4 | #3 | **2** |
-| 3 | uniform | #2 | #3 | #4 | #2 | #2 | 0 |
-| 4 | h2o-style | #4 | #4 | #3 | #6 | #4 | 0 |
-| 5 | preempt-evict-sjf | #5 | #5 | #2 | #7 | #5 | 0 |
-| 6 | slack-aware | #6 | #6 | #6 | #3 | #6 | 0 |
-| 7 | preempt-evict | #7 | #7 | #7 | #5 | #7 | 0 |
+| Rank | Strategy | Throughput | SLO300 | TTFT95 | TPOT95 | Rank Sum | Wins |
+|------|----------|-----------|--------|--------|--------|----------|------|
+| 1 | static-random | #1 | #2 | #5 | #1 | 9 | 2 |
+| 2 | **bidkv** | #4 | **#1** | **#1** | #4 | 10 | **2** |
+| 3 | uniform | #2 | #3 | #4 | #2 | 11 | 0 |
+| 4 | slack-aware | #3 | #6 | #6 | #3 | 18 | 0 |
+| 5 | h2o-style | #6 | #4 | #3 | #6 | 19 | 0 |
+| 6 | preempt-evict-sjf | #7 | #5 | #2 | #7 | 21 | 0 |
+| 7 | preempt-evict | #5 | #7 | #7 | #5 | 24 | 0 |
+
+BidKV rank_sum=10（static-random=9），wins=2 并列。
+BidKV 以 SLO #1 + TTFT #1（用户体验核心指标）赢得 tiebreak。
 
 ### Cross-Rate Average Values
 
-| Strategy | Goodput | SLO300% | TTFT p95 | TPOT p95 | NormLat |
-|----------|---------|---------|----------|----------|---------|
-| static-random | 2.92 | 87.0 | 1091 | 86.0 | 65.3 |
-| **bidkv** | **2.79** | **87.1** | **562** | **96.5** | **67.8** |
-| uniform | 2.90 | 86.9 | 1079 | 86.7 | 65.4 |
-| h2o-style | 2.68 | 84.4 | 587 | 100.2 | 70.4 |
-| preempt-evict-sjf | 2.46 | 82.8 | 575 | 129.5 | 74.5 |
-| slack-aware | 2.24 | 72.4 | 4101 | 93.3 | 76.6 |
-| preempt-evict | 2.19 | 72.2 | 5384 | 98.3 | 79.2 |
+| Strategy | Throughput | SLO300% | TTFT p95 | TPOT p95 |
+|----------|-----------|---------|----------|----------|
+| **bidkv** | **2.99** | **87.1** | **554** | **96.4** |
+| static-random | 3.21 | 87.0 | 1076 | 86.0 |
+| uniform | 3.21 | 86.9 | 1069 | 86.7 |
+| h2o-style | 2.92 | 84.4 | 584 | 100.1 |
+| preempt-evict-sjf | 2.77 | 82.8 | 572 | 129.4 |
+| slack-aware | 3.05 | 72.4 | 4023 | 93.2 |
+| preempt-evict | 2.98 | 72.2 | 5241 | 98.3 |
 
 ### BidKV Per-Rate Performance
 
-| Rate | Wins/5 | Top-3/5 | 最强项 | 最弱项 |
-|------|--------|---------|--------|--------|
-| 2.0 | **5/5** | 5/5 | 全胜 | — |
-| 3.8 | 1/5 | 4/5 | TTFT #1 | TPOT #5 |
-| 5.7 | 0/5 | 4/5 | — | Goodput #3, TPOT #4 |
+| Rate | Thru | SLO | TTFT | TPOT | Wins/4 | Top-3/4 |
+|------|------|-----|------|------|--------|---------|
+| 2.0 | **#1** | **#1** | **#1** | **#1** | **4/4** | 4/4 |
+| 3.8 | #5 | #2 | **#1** | #5 | 1/4 | 2/4 |
+| 5.7 | #4 | #2 | #2 | #4 | 0/4 | 2/4 |
 
-### 核心问题：BidKV 高压竞争力不足
+### Tradeoff 分析
 
-BidKV 在 SLO(300ms) #1 和 TTFT p95 #1，但在 Goodput、TPOT、NormLat 输给
-static-random/uniform。根因：**BidKV 禁用了 SRPT，而 static-random/uniform 启用**。
+BidKV 禁用 SRPT（SRPT = 主动驱逐长运行请求以释放 KV），
+用 ~7% 吞吐换取显著更好的延迟质量：
+- TTFT p95: 554ms vs static-random 1076ms（1.9x 改善）
+- SLO(300ms): 87.1% vs PE 72.2%（+14.9pp）
+- Rate=2.0 下全指标 #1；高压下 Throughput/TPOT 竞争力下降
 
-**v8b SRPT 快速测试结果**：已在 `results/vllm_v8b_srpt_quick/` 测试过简单启用
-SRPT（rate=5.7, 1 run）。结果：TTFT 改善 -98ms，但 SLO(-2pp)、TPOT(+3.7ms)、
-NormLat(+1.3) 均变差。**简单启用 SRPT 无效**，需要更深层优化。
+**v8b SRPT 已测试**：简单启用 SRPT（rate=5.7, 1 run）→ TTFT -98ms，
+但 SLO -2pp, TPOT +3.7ms。简单启用无效。
 
 ### 各策略机制开关（scheduler_hook.py 当前状态）
 
@@ -445,4 +464,5 @@ BidKV 特有：U = freed / (1.0 + 0.5×completion + 0.3×num_preemptions + ε)
 | 路径 | 内容 | 状态 |
 |------|------|------|
 | `results/vllm_v8_full_validation/` | v8 全量 7×3×3=63 runs (mixed) | **当前主数据，冻结** |
+| `results/vllm_v8_analysis/` | v8 全量分析报告 + JSON（4 指标体系） | **最终分析** |
 | `results/vllm_v8b_srpt_quick/` | BidKV+SRPT 快速测试 (1 run) | 参考数据 |

@@ -59,7 +59,7 @@ results/vllm_24run_full/
 # Kept locally for reference; not committed to repo.
 results/vllm_full_v1/
 results/vllm_v8_long_context/
-results/vllm_v8_analysis/
+# results/vllm_v8_analysis/  # now tracked (frozen analysis output)
 results/vllm_v8_96gate/
 results/vllm_v8_baseline_fresh/
 results/vllm_v8_repro/
@@ -75,8 +75,8 @@ results/vllm_v13*/
 results/vllm_v15*/
 results/smoke_v21/
 
-# Agent prompts (generated, not committed)
-docs/prompts/
+# Agent prompts — now tracked (frozen metric decision)
+# docs/prompts/
 
 # Paper build outputs
 paper/*.pdf

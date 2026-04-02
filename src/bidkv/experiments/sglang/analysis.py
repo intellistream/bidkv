@@ -100,7 +100,8 @@ def _load_collector_results_as_report(
         # adapter_metrics 中的驱逐数据
         adapter_metrics = data.get("adapter_metrics", {})
         total_evictions = adapter_metrics.get(
-            "total_evictions", adapter_metrics.get("total_compressions", 0),
+            "total_evictions",
+            adapter_metrics.get("total_compressions", 0),
         )
         total_requests_seen = adapter_metrics.get("total_requests", len(request_results))
         coverage = total_evictions / total_requests_seen if total_requests_seen > 0 else 0.0

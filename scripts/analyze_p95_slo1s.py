@@ -1,4 +1,5 @@
 """Analyze with SLO=1s for Mixed and P95 metrics (no P50)."""
+
 from __future__ import annotations
 
 import glob
@@ -62,8 +63,13 @@ def avg_runs(paths: list[str], slo_thresh: float) -> dict | None:
     if not runs:
         return None
     keys = [
-        "success_pct", "tput", "ttft95", "ttft99",
-        "tpot95", "tpot99", "normlat",
+        "success_pct",
+        "tput",
+        "ttft95",
+        "ttft99",
+        "tpot95",
+        "tpot99",
+        "normlat",
     ]
     avg: dict = {}
     for k in keys:
@@ -85,8 +91,12 @@ def single_run(path: str, slo_thresh: float) -> dict | None:
 
 
 def print_table(
-    title: str, workload: str, rates: list,
-    slo_thresh: float, strats: list[str], rate_fmt: str,
+    title: str,
+    workload: str,
+    rates: list,
+    slo_thresh: float,
+    strats: list[str],
+    rate_fmt: str,
 ) -> None:
     header = (
         f"{'Strategy':<22} {'Rate':>5} {'Succ%':>6} {'SLO%':>6} "
@@ -105,10 +115,7 @@ def print_table(
     for rate in rates:
         rate_s = f"{rate:{rate_fmt}}"
         for strat in strats:
-            files = glob.glob(
-                f"results/vllm_full_v1/"
-                f"{strat}__{workload}__rate{rate}__r*.json"
-            )
+            files = glob.glob(f"results/vllm_full_v1/{strat}__{workload}__rate{rate}__r*.json")
             if not files:
                 continue
             m = avg_runs(files, slo_thresh)
@@ -125,10 +132,7 @@ def print_table(
 
         # v5b bidkv
         v5b_sfx = "_mixed" if workload == "mixed" else ""
-        v5b_path = (
-            f"results/vllm_validation_v5b{v5b_sfx}/"
-            f"bidkv__{workload}__rate{rate}__r0.json"
-        )
+        v5b_path = f"results/vllm_validation_v5b{v5b_sfx}/bidkv__{workload}__rate{rate}__r0.json"
         v5 = single_run(v5b_path, slo_thresh)
         if v5:
             print(
@@ -145,29 +149,46 @@ def print_table(
 
 def main() -> None:
     strats = [
-        "preempt-evict", "preempt-evict-sjf", "static-random",
-        "h2o-style", "uniform", "slack-aware", "bidkv",
+        "preempt-evict",
+        "preempt-evict-sjf",
+        "static-random",
+        "h2o-style",
+        "uniform",
+        "slack-aware",
+        "bidkv",
     ]
 
     # Mixed: SLO = 1s (tighter threshold for differentiation)
     print_table(
-        "MIXED WORKLOAD — SLO=1000ms", "mixed",
-        [2.0, 3.8, 5.7], 1000.0, strats, ".1f",
+        "MIXED WORKLOAD — SLO=1000ms",
+        "mixed",
+        [2.0, 3.8, 5.7],
+        1000.0,
+        strats,
+        ".1f",
     )
 
     print()
 
     # Long-Context: SLO = 5s (unchanged)
     print_table(
-        "LONG-CONTEXT WORKLOAD — SLO=5000ms", "long_context",
-        [0.35, 0.5, 0.7], 5000.0, strats, ".2f",
+        "LONG-CONTEXT WORKLOAD — SLO=5000ms",
+        "long_context",
+        [0.35, 0.5, 0.7],
+        5000.0,
+        strats,
+        ".2f",
     )
 
     # Also show Mixed with SLO=2s for reference
     print()
     print_table(
-        "MIXED WORKLOAD — SLO=2000ms (reference)", "mixed",
-        [3.8, 5.7], 2000.0, strats, ".1f",
+        "MIXED WORKLOAD — SLO=2000ms (reference)",
+        "mixed",
+        [3.8, 5.7],
+        2000.0,
+        strats,
+        ".1f",
     )
 
 
