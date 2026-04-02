@@ -126,7 +126,10 @@ def _extract_observation(
         p99_ttft = ttfts[p99_idx]
 
     # Eviction metrics from adapter
-    eviction_count = int(result.adapter_metrics.get("total_compressions", 0))
+    _am = result.adapter_metrics
+    eviction_count = int(
+        _am.get("total_evictions", _am.get("total_compressions", 0)),
+    )
     if eviction_count == 0:
         # Also check preemption count for preempt-evict
         eviction_count = int(result.adapter_metrics.get("total_preemptions", 0))

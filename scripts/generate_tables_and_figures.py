@@ -105,7 +105,7 @@ def load_run(filepath: Path) -> dict:
         "tpot_p95": percentile(tpots, 95),
         "tpot_p99": percentile(tpots, 99),
         "slo_attainment": slo_pct,
-        "eviction_count": am.get("total_compressions", 0),
+        "eviction_count": am.get("total_evictions", am.get("total_compressions", 0)),
         "tokens_freed": am.get("total_tokens_freed", 0),
         "total_requests": total,
         "successful_requests": success,

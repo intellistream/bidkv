@@ -97,17 +97,19 @@ def _load_collector_results_as_report(
         else:
             slo_attainment = 0.0
 
-        # adapter_metrics 中的 compression 数据
+        # adapter_metrics 中的驱逐数据
         adapter_metrics = data.get("adapter_metrics", {})
-        total_compressions = adapter_metrics.get("total_compressions", 0)
+        total_evictions = adapter_metrics.get(
+            "total_evictions", adapter_metrics.get("total_compressions", 0),
+        )
         total_requests_seen = adapter_metrics.get("total_requests", len(request_results))
-        coverage = total_compressions / total_requests_seen if total_requests_seen > 0 else 0.0
+        coverage = total_evictions / total_requests_seen if total_requests_seen > 0 else 0.0
 
         metrics = ExperimentMetrics(
             slo_attainment_rate=slo_attainment,
             p99_ttft_ms=p99_ttft,
             throughput_rps=throughput,
-            compression_coverage=coverage,
+            eviction_coverage=coverage,
             adapter_metrics=adapter_metrics,
         )
 

@@ -296,7 +296,7 @@ class TestMetrics:
         """metrics.as_dict() 返回标准字段。"""
         m = active_adapter.metrics.as_dict()
         expected_keys = {
-            "total_compressions",
+            "total_evictions",
             "total_tokens_freed",
             "total_pressure_events",
             "total_requests_completed",
@@ -310,12 +310,12 @@ class TestMetrics:
         """指标应正确累积。"""
         active_adapter.metrics.record_pressure_event()
         active_adapter.metrics.record_pressure_event()
-        active_adapter.metrics.record_compression("req-1", 50)
+        active_adapter.metrics.record_eviction("req-1", 50)
         active_adapter.metrics.record_decode_step("req-1")
 
         m = active_adapter.metrics.as_dict()
         assert m["total_pressure_events"] == 2
-        assert m["total_compressions"] == 1
+        assert m["total_evictions"] == 1
         assert m["total_tokens_freed"] == 50
         assert m["total_decode_steps"] == 1
 

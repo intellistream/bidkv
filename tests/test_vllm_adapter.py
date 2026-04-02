@@ -284,27 +284,27 @@ class TestAdapterMetrics:
 
     def test_initial_metrics(self) -> None:
         m = AdapterMetrics()
-        assert m.total_compressions == 0
+        assert m.total_evictions == 0
         assert m.total_tokens_freed == 0
         assert m.total_pressure_events == 0
 
-    def test_record_compression(self) -> None:
+    def test_record_eviction(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 100)
-        assert m.total_compressions == 1
+        m.record_eviction("req-1", 100)
+        assert m.total_evictions == 1
         assert m.total_tokens_freed == 100
 
-    def test_record_compression_zero_is_noop(self) -> None:
+    def test_record_eviction_zero_is_noop(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 0)
-        assert m.total_compressions == 0
+        m.record_eviction("req-1", 0)
+        assert m.total_evictions == 0
 
     def test_as_dict(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 50)
+        m.record_eviction("req-1", 50)
         m.record_pressure_event()
         d = m.as_dict()
-        assert d["total_compressions"] == 1
+        assert d["total_evictions"] == 1
         assert d["total_tokens_freed"] == 50
         assert d["total_pressure_events"] == 1
 
@@ -795,7 +795,7 @@ class TestTailTruncation:
 
         assert freed == 32  # 2 blocks × 16 tokens
         assert scheduler.preempted_requests == []  # NOT preempted
-        assert adapter.metrics.total_compressions == 1
+        assert adapter.metrics.total_evictions == 1
         assert adapter.metrics.total_tokens_freed == 32
 
     def test_block_truncation_frees_tail_blocks(self, h2o_scoring: H2OScoring) -> None:

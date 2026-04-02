@@ -16,7 +16,7 @@ class ExperimentMetrics:
     Fields correspond to the metrics reported in the BidKV paper:
     - SLO attainment and latency: ``slo_attainment_rate``, ``p99_ttft_ms``
     - Throughput: ``throughput_rps``
-    - Compression effectiveness: ``compression_coverage``
+    - Eviction effectiveness: ``eviction_coverage``
     - Quality (optional, task-dependent): ``quality_rouge1``, ``quality_em``
     - Adapter internals: ``adapter_metrics`` (from ``BaseAdapterMetrics.as_dict()``)
     """
@@ -24,7 +24,7 @@ class ExperimentMetrics:
     slo_attainment_rate: float
     p99_ttft_ms: float
     throughput_rps: float
-    compression_coverage: float
+    eviction_coverage: float
     quality_rouge1: float | None = None
     quality_em: float | None = None
     adapter_metrics: dict[str, int] = field(default_factory=dict)
@@ -35,7 +35,7 @@ class ExperimentMetrics:
             "slo_attainment_rate": self.slo_attainment_rate,
             "p99_ttft_ms": self.p99_ttft_ms,
             "throughput_rps": self.throughput_rps,
-            "compression_coverage": self.compression_coverage,
+            "eviction_coverage": self.eviction_coverage,
             "quality_rouge1": self.quality_rouge1,
             "quality_em": self.quality_em,
             "adapter_metrics": dict(self.adapter_metrics),

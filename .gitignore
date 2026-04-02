@@ -55,6 +55,26 @@ results/traces_seed99_backup/
 results/formal/traces_seed99_backup/
 results/vllm_24run_full/
 
+# Stale intermediate experiment data (pre-v8-frozen)
+# Kept locally for reference; not committed to repo.
+results/vllm_full_v1/
+results/vllm_v8_long_context/
+results/vllm_v8_analysis/
+results/vllm_v8_96gate/
+results/vllm_v8_baseline_fresh/
+results/vllm_v8_repro/
+results/vllm_baselines_gpu05/
+results/vllm_lifo_test/
+results/vllm_tiered_test/
+results/vllm_validation_v*/
+results/vllm_v9_quick/
+results/vllm_v10*/
+results/vllm_v11*/
+results/vllm_v12*/
+results/vllm_v13*/
+results/vllm_v15*/
+results/smoke_v21/
+
 # Agent prompts (generated, not committed)
 docs/prompts/
 

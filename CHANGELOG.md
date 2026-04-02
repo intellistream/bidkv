@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Freeze v8 experiment environment** (2026-04-02):
+  - Server params frozen: `--gpu-memory-utilization 0.5 --num-gpu-blocks-override 600
+    --max-num-seqs 32 --block-size 16 --max-model-len 8192 --enforce-eager`
+  - Workload rates frozen: mixed (2.0, 3.8, 5.7), long_context (0.35, 0.5, 0.7)
+  - v8 mixed 63-run data frozen at `results/vllm_v8_full_validation/`
+  - Updated copilot instructions with frozen params, full ranking tables, v8b SRPT results
+  - Cleaned 230 stale intermediate result files from git tracking (pre-v8 data)
+  - Added stale result dirs to .gitignore
+
+- **Rename compression metrics to eviction metrics** (#terminology):
+  - `total_compressions` → `total_evictions`（字段、dict key、JSON 输出）
+  - `record_compression()` → `record_eviction()`（方法名）
+  - `compression_coverage` → `eviction_coverage`（ExperimentMetrics 字段）
+  - `_plot_compression_coverage()` → `_plot_eviction_coverage()`
+  - 所有 analysis/report/pilot_calibration 代码同步更新
+  - 旧 JSON 数据向后兼容：fallback 读取 `total_compressions` / `compression_coverage`
+  - 动机：BidKV 在 Mode A 中是请求调度原语，不做压缩；"compression" 术语误导
+
 - **scheduler_hook: finalize v8 scheduling with improved comments**:
   - Removed v11c proactive cheapest-victim block (reverted to generic cached-priority
     path with cost-benefit gate). Empirical evidence: proactive evictions add recompute

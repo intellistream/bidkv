@@ -58,9 +58,9 @@ class StrategyAggregation:
     # -- SLO attainment（可选辅助指标）--
     slo_attainment_rate_mean: float = 0.0
     slo_attainment_rate_ci95: float = 0.0
-    # -- 压缩辅助指标 --
-    compression_coverage_mean: float = 0.0
-    total_compressions_mean: float = 0.0
+    # -- 驱逐辅助指标 --
+    eviction_coverage_mean: float = 0.0
+    total_evictions_mean: float = 0.0
     total_tokens_freed_mean: float = 0.0
     pressure_events_mean: float = 0.0
 
@@ -140,7 +140,11 @@ def aggregate_results(
         ]
 
         # adapter metrics
-        total_comps = [float(r.adapter_metrics.get("total_compressions", 0)) for r in group]
+        def _get_evictions(r: RunResult) -> float:
+            am = r.adapter_metrics
+            return float(am.get("total_evictions", am.get("total_compressions", 0)))
+
+        total_evicts = [_get_evictions(r) for r in group]
         total_freed = [float(r.adapter_metrics.get("total_tokens_freed", 0)) for r in group]
         pressure_events = [float(r.adapter_metrics.get("total_pressure_events", 0)) for r in group]
 
@@ -154,17 +158,17 @@ def aggregate_results(
         norm_lat_mean, norm_lat_ci = compute_ci95(norm_lats)
         slo_mean, slo_ci = compute_ci95(slo_attainments)
 
-        # Compression coverage = requests with compression / total requests
+        # Eviction coverage = requests with eviction / total requests
         coverages = []
         for r in group:
             total_reqs = len(r.successful_requests)
             # 简化：从 adapter metrics 推断
-            comps = r.adapter_metrics.get("total_compressions", 0)
-            cov = comps / total_reqs if total_reqs > 0 else 0.0
+            evicts = _get_evictions(r)
+            cov = evicts / total_reqs if total_reqs > 0 else 0.0
             coverages.append(min(1.0, cov))
 
         cov_mean, _ = compute_ci95(coverages)
-        comp_mean, _ = compute_ci95(total_comps)
+        comp_mean, _ = compute_ci95(total_evicts)
         freed_mean, _ = compute_ci95(total_freed)
         pe_mean, _ = compute_ci95(pressure_events)
 
@@ -192,8 +196,8 @@ def aggregate_results(
                 normalized_latency_ci95=norm_lat_ci,
                 slo_attainment_rate_mean=slo_mean,
                 slo_attainment_rate_ci95=slo_ci,
-                compression_coverage_mean=cov_mean,
-                total_compressions_mean=comp_mean,
+                eviction_coverage_mean=cov_mean,
+                total_evictions_mean=comp_mean,
                 total_tokens_freed_mean=freed_mean,
                 pressure_events_mean=pe_mean,
             )
@@ -253,8 +257,8 @@ def export_summary_json(
                     "mean": a.slo_attainment_rate_mean,
                     "ci95": a.slo_attainment_rate_ci95,
                 },
-                "compression_coverage": a.compression_coverage_mean,
-                "total_compressions": a.total_compressions_mean,
+                "eviction_coverage": a.eviction_coverage_mean,
+                "total_evictions": a.total_evictions_mean,
                 "total_tokens_freed": a.total_tokens_freed_mean,
                 "pressure_events": a.pressure_events_mean,
             }
@@ -310,8 +314,8 @@ def generate_figures(
     # Figure 2 [Cat A]: P99 TTFT vs Throughput — Pareto 散点图
     generated.extend(_plot_pareto_front(aggregations, figures_dir))
 
-    # Figure 5 [Cat A]: Compression coverage
-    generated.extend(_plot_compression_coverage(aggregations, figures_dir))
+    # Figure 5 [Cat A]: Eviction coverage
+    generated.extend(_plot_eviction_coverage(aggregations, figures_dir))
 
     logger.info("Generated %d figures in %s", len(generated), figures_dir)
     return generated
@@ -421,24 +425,24 @@ def _plot_pareto_front(
     return paths
 
 
-def _plot_compression_coverage(
+def _plot_eviction_coverage(
     aggregations: list[StrategyAggregation],
     output_dir: Path,
 ) -> list[Path]:
-    """Figure 5: Compression coverage comparison."""
+    """Figure 5: Eviction coverage comparison."""
     import matplotlib.pyplot as plt
 
-    # 仅包含有压缩能力的策略（排除 preempt-evict）
-    compress_strategies = [a for a in aggregations if a.strategy != "preempt-evict"]
-    if not compress_strategies:
+    # 仅包含有主动驱逐能力的策略（排除 preempt-evict）
+    evict_strategies = [a for a in aggregations if a.strategy != "preempt-evict"]
+    if not evict_strategies:
         return []
 
     paths: list[Path] = []
-    workloads = sorted({a.workload for a in compress_strategies})
+    workloads = sorted({a.workload for a in evict_strategies})
 
     for workload in workloads:
         fig, ax = plt.subplots(figsize=(10, 6))
-        wl_data = [a for a in compress_strategies if a.workload == workload]
+        wl_data = [a for a in evict_strategies if a.workload == workload]
 
         strategies = sorted({a.strategy for a in wl_data})
         rates = sorted({a.request_rate for a in wl_data})
@@ -450,13 +454,13 @@ def _plot_compression_coverage(
             coverages = []
             for rate in rates:
                 match = [a for a in wl_data if a.strategy == strategy and a.request_rate == rate]
-                coverages.append(match[0].compression_coverage_mean * 100 if match else 0)
+                coverages.append(match[0].eviction_coverage_mean * 100 if match else 0)
             positions = [x + i * bar_width for x in x_positions]
             ax.bar(positions, coverages, bar_width, label=strategy)
 
         ax.set_xlabel("Request Rate (req/s)")
-        ax.set_ylabel("Compression Coverage (%)")
-        ax.set_title(f"[Category A] Compression Coverage — {workload}")
+        ax.set_ylabel("Eviction Coverage (%)")
+        ax.set_title(f"[Category A] Eviction Coverage — {workload}")
         ax.set_xticks([x + bar_width * len(strategies) / 2 for x in x_positions])
         ax.set_xticklabels([str(r) for r in rates])
         ax.legend(fontsize=8, ncol=2)

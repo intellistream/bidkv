@@ -458,7 +458,7 @@ def _proactive_preempt(scheduler: Any, adapter: SGLangAdapter) -> None:
         return
 
     scheduler._bidkv_last_proactive = now
-    adapter._metrics.record_compression(victim_id, freed_estimate)
+    adapter._metrics.record_eviction(victim_id, freed_estimate)
     _diag(
         f"proactive PREEMPT: strategy={strategy_name} "
         f"victim={victim_id} usage={usage:.2f} freed~{freed_estimate}"
@@ -546,7 +546,7 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
         return
 
     scheduler._bidkv_last_srpt = now
-    adapter._metrics.record_compression(victim_id, worst_remaining)
+    adapter._metrics.record_eviction(victim_id, worst_remaining)
     _diag(
         f"SRPT preempt: strategy={strategy_name} victim={victim_id} "
         f"remaining={worst_remaining} waiting_cost={best_waiting_cost} "

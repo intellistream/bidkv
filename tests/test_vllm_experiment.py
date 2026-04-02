@@ -285,7 +285,7 @@ class TestRunResultPersistence:
                     total_latency_ms=200.0,
                 ),
             ],
-            adapter_metrics={"total_compressions": 5, "total_tokens_freed": 1024},
+            adapter_metrics={"total_evictions": 5, "total_tokens_freed": 1024},
         )
 
         path = save_run_result(result, tmp_path)
@@ -296,7 +296,7 @@ class TestRunResultPersistence:
         assert loaded.request_rate == 2.0
         assert len(loaded.request_results) == 1
         assert loaded.request_results[0].ttft_ms == 50.0
-        assert loaded.adapter_metrics["total_compressions"] == 5
+        assert loaded.adapter_metrics["total_evictions"] == 5
 
     def test_save_with_candidate_snapshots(self, tmp_path: pytest.TempPathFactory) -> None:
         result = RunResult(
@@ -374,7 +374,7 @@ class TestAggregation:
                         for i in range(10)
                     ],
                     adapter_metrics={
-                        "total_compressions": 2 + run_idx,
+                        "total_evictions": 2 + run_idx,
                         "total_tokens_freed": 100 + run_idx * 50,
                         "total_pressure_events": 5,
                     },

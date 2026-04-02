@@ -10,7 +10,7 @@
 | Python         | ≥ 3.10                                                               |
 | 外部依赖       | **零** — 仅依赖 Python stdlib                                        |
 | 论文           | SC 2026 投稿，deadline 2026-04-10                                    |
-| 当前 Phase     | **Phase D 优化迭代** — 主攻 Mixed TTFT 优势，Long-Context 门控保底  |
+| 当前 Phase     | **Phase D 优化迭代** — v8 mixed 全量完成，调优 BidKV 高压竞争力    |
 
 ## 项目定位
 
@@ -57,11 +57,11 @@ src/bidkv/
 ├── baselines/               # 7 策略（6 baseline + BidKV）
 │   ├── base.py              # BaselineStrategy ABC, RequestState, BaselineContext
 │   ├── registry.py          # BaselineRegistry（名称→策略实例）
-│   ├── preempt_evict.py     # 1. vLLM 原生 baseline
-│   ├── static_random.py     # 2. 随机压缩
-│   ├── h2o_style.py         # 3. attention-based heuristic
-│   ├── uniform.py           # 4. 均等压缩
-│   ├── global_nobid.py      # 5. 系统推断（无 bid）
+│   ├── preempt_evict.py     # 1. vLLM 原生 baseline (FCFS+LIFO)
+│   ├── preempt_evict_sjf.py # 2. PE + SJF admission
+│   ├── static_random.py     # 3. 随机驱逐
+│   ├── h2o_style.py         # 4. attention-based heuristic
+│   ├── uniform.py           # 5. 均等驱逐
 │   ├── slack_aware.py       # 6. SLO-deadline aware
 │   └── bidkv_strategy.py    # 7. BidKV 完整系统
 ├── adapters/                # 框架适配器
@@ -147,13 +147,13 @@ BidKV 不修改这个执行路径，只控制“谁被选中”。
 
 所有 7 个策略的调度分化：
 
-| 层面               | preempt-evict | slack-aware | random/h2o/uniform/nobid | bidkv                          |
-| ------------------ | ------------- | ----------- | ------------------------ | ------------------------------ |
-| Waiting 排序       | FCFS (无排序) | EDF (到达序) | SJF (prompt_tokens)      | SJF (prompt_tokens)            |
-| Running 排序       | LIFO (无排序) | cached prio | cached prio              | cached prio                    |
-| select_victims()   | N/A           | slack-based | 各自启发式               | **U = r/(δ+ε)** 质量感知      |
-| SRPT 主动驱逐      | ❌            | ❌          | ✅ (同等估算)            | ✅ (同等估算)                  |
-| Proactive preempt  | ❌            | ✅          | ✅                       | ✅                             |
+| 层面               | PE            | PE-SJF        | Slack       | Random/H2O/Uniform | BidKV                          |
+| ------------------ | ------------- | ------------- | ----------- | ------------------- | ------------------------------ |
+| Waiting 排序       | FCFS (无排序) | SJF           | EDF (到达序) | SJF (prompt_tokens) | SJF (prompt_tokens)            |
+| Running 排序       | LIFO (无排序) | LIFO (无排序) | cached prio | cached prio         | 95% KV 门控 + avg_prompt≤500  |
+| select_victims()   | N/A           | N/A           | slack-based | 各自启发式          | **U = r/(δ+ε)** 质量感知      |
+| SRPT 主动驱逐      | ❌            | ❌            | ❌          | ✅ (同等估算)       | ❌ (recompute 成本过高)        |
+| Proactive preempt  | ❌            | ❌            | ✅          | ✅                  | ✅                             |
 
 BidKV 的唯一分化点：`select_victims()` 中使用完整 scoring→bid→pool→solver
 管线计算 **U = tokens_freed / (quality_delta + ε)**，实现质量感知的 preemption 排序。
@@ -351,58 +351,98 @@ conda run -n sagellm python -m ruff check . && conda run -n sagellm python -m ru
 - 模型：Llama-3.1-8B-Instruct（bf16, 16GB）
 - 推理引擎：vLLM 0.17.1 (v1 架构) + SGLang (RadixAttention)
 - KV 限制：`--num-gpu-blocks-override 600`（600×16=9600 tokens，**必须指定否则无 KV 压力**）
-- 并发：`--max-num-seqs 32`，`--gpu-memory-utilization 0.85`
+- 并发：`--max-num-seqs 32`，`--gpu-memory-utilization 0.5`
 
-## 实验结果现状与优化方针（2026-04-01）
+## 冻结实验环境（v8-frozen，2026-04-02）
 
-### 全量实验已完成
+### 服务端参数（不可修改，所有后续实验必须使用）
 
-7 策略 × 2 workloads × 3 rates × 3 runs = 126 组，结果在 `results/vllm_full_v1/`。
-额外的 v5b 验证 runs 在 `results/vllm_validation_v5b/` 和 `results/vllm_validation_v5b_mixed/`。
+```
+--model           /home/cyb/.cache/huggingface/hub/Llama-3.1-8B-Instruct
+--gpu-memory-utilization  0.5
+--num-gpu-blocks-override 600    # 600×16=9600 tokens KV
+--max-num-seqs    32
+--block-size      16
+--max-model-len   8192
+--enforce-eager
+--disable-frontend-multiprocessing
+--no-enable-prefix-caching
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+```
 
-### 关键发现
+### 工作负载参数（RULE RATE-FREEZE）
 
-**Mixed 工作负载：BidKV 在 TTFT 尾部延迟上有明显优势**
-- rate=5.7: bidkv(v5b) TTFT p99=3331ms（全场最佳），pe-sjf 6476ms，h2o 4782ms
-- rate=3.8: bidkv SLO(2s) ≈98%，TTFT p99 ≈3400-3800ms（Top 1-3）
-- **代价**：Tput 落后 pe-sjf ~16%，TPOT p99 偏高（proactive+SRPT recompute 开销）
+| 工作负载 | Rates (req/s) | Requests/run | Runs/combo |
+|----------|--------------|-------------|------------|
+| mixed | 2.0, 3.8, 5.7 | 1000 | 3 |
+| long_context | 0.35, 0.5, 0.7 | 500 | 3 |
 
-**Long-Context 工作负载：BidKV 存在结构性劣势**
-- Mode A recompute 语义下，long prompt 驱逐→重算成本 >> 调度收益
-- v5 三重门控（avg_prompt>500 skip reorder, remaining<prompt skip eviction）可缩小差距
-- 目标：与 pe-sjf 差距可控即可，不强求超越
+### 观测指标体系
 
-### 当前优化方针
+**主表指标**（论文 Table 1，5 列）：
+- Goodput(500ms) — DistServe (OSDI'24)
+- SLO attainment(300ms) — S³ (ISCA'24)
+- TTFT p95 — 尾部延迟主指标
+- TPOT p95 — Sarathi-Serve (OSDI'24)，统一使用 P95（P99 样本量不足方差过大）
+- Normalized Latency — Orca (OSDI'22)
 
-| 维度 | 策略 |
-|------|------|
-| **主攻** | Mixed 场景，TTFT 为核心指标，要求 BidKV 明显优于 vLLM 原生和其他 baselines |
-| **保底** | Long-Context 使用门控机制，力求与 pe-sjf 差距不大 |
-| **SLO 阈值** | Mixed 从 2s 调至 **1s** 以拉开策略间差距（2s 下各策略 SLO 差异仅 1-2pp） |
-| **指标展示** | 不展示 P50，改为展示 **P95**（P50 差异太小不具区分度） |
-| **迭代原则** | 新方案效果更好→更新；效果不好→保留老数据和方法 |
+## v8 Mixed 全量结果（63 runs，2026-04-02 冻结）
 
-### Mode A 结构性 Tradeoff
+### Cross-Rate Average Ranking（7 策略 × 3 rates × 3 runs）
 
-proactive eviction + SRPT → TTFT↓（waiting 更快入场）但 Tput↓ + TPOT↑（recompute 开销）。
-这是 Mode A (request-level recompute) 的固有 tradeoff，非 bug。
-未来 Mode B (token-level release) 可消除此 tradeoff（issue #054）。
+| Rank | Strategy | Goodput | SLO300 | TTFT95 | TPOT95 | NrmLat | Wins |
+|------|----------|---------|--------|--------|--------|--------|------|
+| 1 | static-random | #1 | #2 | #5 | #1 | #1 | 3 |
+| 2 | **bidkv** | #3 | **#1** | **#1** | #4 | #3 | **2** |
+| 3 | uniform | #2 | #3 | #4 | #2 | #2 | 0 |
+| 4 | h2o-style | #4 | #4 | #3 | #6 | #4 | 0 |
+| 5 | preempt-evict-sjf | #5 | #5 | #2 | #7 | #5 | 0 |
+| 6 | slack-aware | #6 | #6 | #6 | #3 | #6 | 0 |
+| 7 | preempt-evict | #7 | #7 | #7 | #5 | #7 | 0 |
 
-### 各策略机制开关（scheduler_hook.py）
+### Cross-Rate Average Values
 
-| 机制 | pe / pe-sjf | slack-aware | random/h2o/uniform/bidkv |
-|------|-------------|-------------|--------------------------|
-| Waiting SJF | ❌/✅ | ❌ (EDF) | ✅ |
-| Proactive preempt | ❌ | ✅ | ✅ |
-| SRPT preempt | ❌ | ❌ | ✅ |
-| Running reorder | ❌ (LIFO) | ✅ (cached) | ✅ (cached) |
-| BidKV v5 gates | N/A | N/A | bidkv only |
+| Strategy | Goodput | SLO300% | TTFT p95 | TPOT p95 | NormLat |
+|----------|---------|---------|----------|----------|---------|
+| static-random | 2.92 | 87.0 | 1091 | 86.0 | 65.3 |
+| **bidkv** | **2.79** | **87.1** | **562** | **96.5** | **67.8** |
+| uniform | 2.90 | 86.9 | 1079 | 86.7 | 65.4 |
+| h2o-style | 2.68 | 84.4 | 587 | 100.2 | 70.4 |
+| preempt-evict-sjf | 2.46 | 82.8 | 575 | 129.5 | 74.5 |
+| slack-aware | 2.24 | 72.4 | 4101 | 93.3 | 76.6 |
+| preempt-evict | 2.19 | 72.2 | 5384 | 98.3 | 79.2 |
+
+### BidKV Per-Rate Performance
+
+| Rate | Wins/5 | Top-3/5 | 最强项 | 最弱项 |
+|------|--------|---------|--------|--------|
+| 2.0 | **5/5** | 5/5 | 全胜 | — |
+| 3.8 | 1/5 | 4/5 | TTFT #1 | TPOT #5 |
+| 5.7 | 0/5 | 4/5 | — | Goodput #3, TPOT #4 |
+
+### 核心问题：BidKV 高压竞争力不足
+
+BidKV 在 SLO(300ms) #1 和 TTFT p95 #1，但在 Goodput、TPOT、NormLat 输给
+static-random/uniform。根因：**BidKV 禁用了 SRPT，而 static-random/uniform 启用**。
+
+**v8b SRPT 快速测试结果**：已在 `results/vllm_v8b_srpt_quick/` 测试过简单启用
+SRPT（rate=5.7, 1 run）。结果：TTFT 改善 -98ms，但 SLO(-2pp)、TPOT(+3.7ms)、
+NormLat(+1.3) 均变差。**简单启用 SRPT 无效**，需要更深层优化。
+
+### 各策略机制开关（scheduler_hook.py 当前状态）
+
+| 机制 | PE | PE-SJF | Slack | Random/H2O/Uniform | BidKV |
+|------|-----|--------|-------|---------------------|-------|
+| Waiting 排序 | FCFS | SJF | EDF | SJF | SJF |
+| Running reorder | ❌ LIFO | ❌ LIFO | ✅ cached prio | ✅ cached prio | ✅ 95% KV 门控 |
+| Proactive preempt | ❌ | ❌ | ✅ KV>90% | ✅ KV>90% | ✅ KV>90% |
+| SRPT preempt | ❌ | ❌ | ❌ | ✅ KV>80% | ❌ |
+
+BidKV 特有：U = freed / (1.0 + 0.5×completion + 0.3×num_preemptions + ε)
 
 ### 数据目录
 
-| 路径 | 内容 |
-|------|------|
-| `results/vllm_full_v1/` | 7×2×3×3=126 完整实验 |
-| `results/vllm_full_v1/backup_old_bidkv/` | 旧 BidKV 公式数据备份 |
-| `results/vllm_validation_v5b/` | v5b long_context rate=0.7 验证 |
-| `results/vllm_validation_v5b_mixed/` | v5b mixed rate=5.7 验证 |
+| 路径 | 内容 | 状态 |
+|------|------|------|
+| `results/vllm_v8_full_validation/` | v8 全量 7×3×3=63 runs (mixed) | **当前主数据，冻结** |
+| `results/vllm_v8b_srpt_quick/` | BidKV+SRPT 快速测试 (1 run) | 参考数据 |

@@ -64,11 +64,11 @@ src/bidkv/
 ├── baselines/               # 7 策略（6 baseline + BidKV）
 │   ├── base.py              # BaselineStrategy ABC, RequestState, BaselineContext
 │   ├── registry.py          # BaselineRegistry（名称→策略实例）
-│   ├── preempt_evict.py     # 1. vLLM 原生 baseline
-│   ├── static_random.py     # 2. 随机压缩
-│   ├── h2o_style.py         # 3. attention-based heuristic
-│   ├── uniform.py           # 4. 均等压缩
-│   ├── global_nobid.py      # 5. 系统推断（无 bid）
+│   ├── preempt_evict.py     # 1. vLLM 原生 baseline (FCFS+LIFO)
+│   ├── preempt_evict_sjf.py # 2. PE + SJF admission
+│   ├── static_random.py     # 3. 随机驱逐
+│   ├── h2o_style.py         # 4. attention-based heuristic
+│   ├── uniform.py           # 5. 均等驱逐
 │   ├── slack_aware.py       # 6. SLO-deadline aware
 │   └── bidkv_strategy.py    # 7. BidKV 完整系统
 ├── adapters/                # 框架适配器
@@ -154,13 +154,13 @@ BidKV 不修改这个执行路径，只控制“谁被选中”。
 
 所有 7 个策略的调度分化：
 
-| 层面               | preempt-evict | slack-aware | random/h2o/uniform/nobid | bidkv                          |
-| ------------------ | ------------- | ----------- | ------------------------ | ------------------------------ |
-| Waiting 排序       | FCFS (无排序) | EDF (到达序) | SJF (prompt_tokens)      | SJF (prompt_tokens)            |
-| Running 排序       | LIFO (无排序) | cached prio | cached prio              | cached prio                    |
-| select_victims()   | N/A           | slack-based | 各自启发式               | **U = r/(δ+ε)** 质量感知      |
-| SRPT 主动驱逐      | ❌            | ❌          | ✅ (同等估算)            | ✅ (同等估算)                  |
-| Proactive preempt  | ❌            | ✅          | ✅                       | ✅                             |
+| 层面               | PE            | PE-SJF        | Slack       | Random/H2O/Uniform | BidKV                          |
+| ------------------ | ------------- | ------------- | ----------- | ------------------- | ------------------------------ |
+| Waiting 排序       | FCFS (无排序) | SJF           | EDF (到达序) | SJF (prompt_tokens) | SJF (prompt_tokens)            |
+| Running 排序       | LIFO (无排序) | LIFO (无排序) | cached prio | cached prio         | 95% KV 门控 + avg_prompt≤500  |
+| select_victims()   | N/A           | N/A           | slack-based | 各自启发式          | **U = r/(δ+ε)** 质量感知      |
+| SRPT 主动驱逐      | ❌            | ❌            | ❌          | ✅ (同等估算)       | ❌ (recompute 成本过高)        |
+| Proactive preempt  | ❌            | ❌            | ✅          | ✅                  | ✅                             |
 
 BidKV 的唯一分化点：`select_victims()` 中使用完整 scoring→bid→pool→solver
 管线计算 **U = tokens_freed / (quality_delta + ε)**，实现质量感知的 preemption 排序。
