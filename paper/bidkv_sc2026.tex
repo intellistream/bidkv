@@ -149,16 +149,11 @@ minimizing aggregate estimated disruption.  In this way, \bidkv turns victim
 selection from an opaque runtime behavior into an explicit interface between a
 \emph{scoring layer}---which estimates per-request reclamation
 sensitivity---and a \emph{coordinated selection layer}---which makes
-batch-level trade-offs across candidates.  Because scorer and solver
-communicate only through the bid interface, \bidkv is
-scorer-agnostic: the scoring mechanism can be replaced without
-modifying the selection algorithm or runtime integration.
+batch-level trade-offs across candidates.
 
 In the current prototype, the disruption estimate is instantiated from
 request-lifecycle features (completion progress, prompt length, preemption
-history) under recompute-fallback semantics~\cite{Kwon2023}; the same
-architecture is designed to admit richer scoring signals (\eg
-attention-based~\cite{Zhang2023h2o, Xiao2024}) without changing the solver.
+history) under recompute-fallback semantics~\cite{Kwon2023}.
 \bidkv integrates non-invasively with both vLLM~\cite{Kwon2023} and
 SGLang~\cite{Zheng2024sglang} via a portable adapter layer that fully reuses
 each framework's native reclamation and recovery paths---the fact that both
@@ -185,11 +180,11 @@ sustained high-pressure conditions.
   reclamation sensitivity to be surfaced to the runtime scheduler, replacing
   implicit victim ordering rules with an explicit decision interface.
 
-\item \textbf{Scorer-agnostic coordination architecture.}
-  We design a decoupled scoring-to-selection pipeline that separates
-  request-level disruption estimation from coordinated cross-request victim
-  selection, so that the scoring strategy and the selection algorithm can
-  evolve independently.
+\item \textbf{Decoupled scoring-to-selection architecture.}
+  We separate request-level disruption estimation from coordinated
+  cross-request victim selection through a structured bid interface,
+  so that selection operates on uniform cost--capacity pairs regardless
+  of how disruption estimates are produced.
 
 \item \textbf{Portable runtime integration.}
   We realize \bidkv as a non-invasive scheduling layer with a
@@ -198,7 +193,7 @@ sustained high-pressure conditions.
   recovery mechanisms without source-code modification.
 
 \item \textbf{Structured evaluation under controlled conditions.}
-  We evaluate seven strategies that vary across scheduling dimensions
+  We evaluate five strategies that vary across scheduling dimensions
   (admission ordering, running-queue reordering, victim selection logic,
   and proactive reclamation) under frozen request traces and calibrated
   arrival rates, supporting structured attribution across these co-varying
@@ -431,32 +426,11 @@ containing the accepted bid IDs, total freed tokens, and cumulative cost.
 
 \subsection{Scoring-to-Bid Layer}\label{sec:design:scoring}
 
-A core design principle is \emph{scorer-agnosticism}: the system does not
-prescribe which token importance metric to use.  It defines a minimal
-\texttt{ScoringStrategy} protocol:
-
-\begin{quote}
-{\small\texttt{score(token\_ids: Sequence[int], **ctx) -> list[float]}}
-\end{quote}
-
-\noindent
-Any object satisfying this protocol---returning per-token importance scores in
-$[0, 1]$---can serve as a scorer.  We implement four strategies:
-
-\begin{itemize}[leftmargin=*,nosep]
-\item \textbf{H2OScoring}~\cite{Zhang2023h2o}: cumulative attention-weight
-  scoring.
-\item \textbf{AttentionWeightScoring}: direct attention-weight extraction.
-\item \textbf{UniformScoring}: all tokens receive score~$0.5$.  Ablation
-  baseline.
-\item \textbf{RandomScoring}: i.i.d.\ uniform random. Ablation baseline.
-\end{itemize}
-
-While token-level scores can drive fine-grained bid generation (\eg partial
-truncation), the recompute-fallback execution model used in this work reclaims
-entire requests.  Each running request therefore produces a single bid with
+The scoring-to-bid layer translates per-request state into a structured bid.
+Under recompute-fallback execution, reclamation releases an entire request's
+KV state; each running request therefore produces a single bid with
 $\tokfree$ equal to its total KV footprint and $\qualdelta$ derived from
-request-level features:
+request-level lifecycle features:
 \begin{equation}\label{eq:delta}
   \qualdelta \;=\; 1 + w_c \cdot \mathit{completion}
     + \frac{n_{\text{prompt}}}{n_{\text{ref}}}
@@ -559,11 +533,11 @@ at three points:
   via the native preemption path with a 5-second cooldown.
   PE and PE-SJF skip this step entirely (they measure the no-intervention
   baseline).
-  (d)~\emph{SRPT preemption} (Static-Random, H2O-Style, Uniform only):
+  (d)~\emph{SRPT preemption} (Static-Random, Largest-First only):
   when KV utilization exceeds 80\%, a running request whose estimated
   remaining work exceeds 1.2$\times$ the total cost of the best waiting
   request is preempted (1.5\,s cooldown, ${<}$2 prior preemptions).
-  BidKV and Slack-Aware disable SRPT because recompute cost outweighs
+  BidKV disables SRPT because recompute cost outweighs
   the scheduling gain.
   Finally, for strategies with running-queue reorder enabled, the hook
   sorts the running list by cached priority so that vLLM's native
@@ -591,7 +565,7 @@ the policy does not alter final outputs; the differentiation
 lies in scheduling efficiency.
 
 \paragraph{Strategy differentiation.}
-Table~\ref{tab:strategy_diff} summarizes how the seven strategies differ in
+Table~\ref{tab:strategy_diff} summarizes how the five strategies differ in
 their scheduling behavior.  All strategies share vLLM's native reclamation
 execution; the differentiation is in waiting-queue ordering, running-queue
 ordering, victim selection logic, and whether proactive reclamation is enabled.
@@ -613,9 +587,7 @@ ordering, victim selection logic, and whether proactive reclamation is enabled.
 PE (default)    & FCFS & LIFO & N/A       & \ding{55} & \ding{55} \\
 PE-SJF          & SJF  & LIFO & N/A       & \ding{55} & \ding{55} \\
 Static-Random   & SJF  & prio & random    & \ding{51} & \ding{51} \\
-H2O-Style       & SJF  & prio & H2O score & \ding{51} & \ding{51} \\
-Uniform         & SJF  & prio & equal     & \ding{51} & \ding{51} \\
-Slack-Aware     & EDF  & prio & slack     & \ding{51} & \ding{55} \\
+Largest-First   & SJF  & prio & capacity  & \ding{51} & \ding{51} \\
 \textbf{BidKV}  & SJF  & gated & $\utilfn{=}\frac{\tokfree}{\qualdelta+\stabeps}$ & \ding{51} & \ding{55} \\
 \bottomrule
 \end{tabular}
@@ -625,7 +597,7 @@ Slack-Aware     & EDF  & prio & slack     & \ding{51} & \ding{55} \\
 
 The \texttt{SGLangAdapter} integrates with SGLang's RadixAttention
 engine~\cite{Zheng2024sglang} by hooking the scheduling entry point.
-We evaluate a three-strategy subset (Preempt-Evict, Slack-Aware, \bidkv) to
+We evaluate a three-strategy subset (Preempt-Evict, Largest-First, \bidkv) to
 verify \emph{directional consistency}: that performance orderings observed on
 vLLM hold on an architecturally distinct framework.
 
@@ -690,7 +662,7 @@ values per run, introducing high run-to-run variance compared with the
 ${\sim}$50~values that determine P95.
 
 \paragraph{Baselines.}
-Seven strategies form a layered comparison that separates contributions of
+Five strategies form a layered comparison that separates contributions of
 waiting-queue ordering, running-queue reordering, proactive reclamation,
 and victim selection logic:
 \begin{enumerate}[nosep]
@@ -701,19 +673,17 @@ and victim selection logic:
   victim logic.
 \item \textbf{Static-Random}: SJF admission, proactive reclamation with
   random victim selection.
-\item \textbf{H2O-Style}~\cite{Zhang2023h2o}: attention-based heavy-hitter
-  scoring for victim selection.
-\item \textbf{Uniform}: equal-weight victim scoring.
-\item \textbf{Slack-Aware}: SLO-deadline-aware victim selection.
+\item \textbf{Largest-First}: capacity-greedy victim selection---evicts
+  the request occupying the most KV blocks.
 \item \textbf{\bidkv}: full system---completion-aware cost estimation
   ($\qualdelta$, Eq.~\ref{eq:delta}) $\to$ bids $\to$ utility-ratio
   greedy solver, with pressure-gated running reorder.
 \end{enumerate}
 
 \noindent
-The progression \emph{PE $\to$ PE-SJF $\to$ H2O-Style $\to$ \bidkv}
+The progression \emph{PE $\to$ PE-SJF $\to$ Largest-First $\to$ \bidkv}
 incrementally introduces SJF admission ordering, proactive reclamation with
-quality-aware victim selection, and coordinated bid-based selection.  Note
+capacity-greedy victim selection, and coordinated bid-based selection.  Note
 that steps in this chain change multiple dimensions simultaneously
 (Table~\ref{tab:strategy_diff}); we use this structure to attribute
 performance differences to groups of co-varying features rather than to
@@ -731,24 +701,23 @@ Table~\ref{tab:main} presents the primary results at the medium arrival rate
 \begin{itemize}[leftmargin=*,nosep]
 \item \textbf{\bidkv achieves the best TTFT P95 and second-best SLO
   at rate\,=\,3.8.}
-  TTFT~P95 is 631\,ms, 5\% below PE-SJF (666\,ms) and 7\% below H2O
+  TTFT~P95 is 631\,ms, 5\% below PE-SJF (666\,ms) and 7\% below Largest-First
   (677\,ms).  SLO(300ms) reaches 83.2\%, 0.9\,pp below Static-Random
-  (84.1\%) but 3.3\,pp above H2O (79.9\%) and 14.8\,pp above PE (68.4\%).
+  (84.1\%) but 3.3\,pp above Largest-First (79.9\%) and 14.8\,pp above PE (68.4\%).
 
 \item \textbf{SRPT-enabled strategies lead on throughput metrics.}
-  Static-Random and Uniform, which enable SRPT aggressive preemption
-  (KV\,$>$\,80\%), achieve the highest Goodput (3.25 and 3.18\,req/s
-  vs.\ \bidkv 3.16), lowest TPOT P95 (91 and 92\,ms vs.\ \bidkv
-  107\,ms), and lowest Normalized Latency (60.4 and 60.8 vs.\ \bidkv
-  65.2).  However, their TTFT P95 is ${\sim}$2$\times$ higher (1216
-  and 1189\,ms vs.\ \bidkv 631\,ms), indicating aggressive throughput
+  Static-Random and Largest-First, which enable SRPT aggressive preemption
+  (KV\,$>$\,80\%), achieve the highest Goodput (3.25 and 2.67\,req/s
+  vs.\ \bidkv 3.16) and lowest TPOT P95 (91\,ms vs.\ \bidkv
+  107\,ms).  However, Static-Random's TTFT P95 is ${\sim}$2$\times$ higher
+  (1216\,ms vs.\ \bidkv 631\,ms), indicating aggressive throughput
   reclamation at the expense of admission latency.
 
 \item \textbf{\bidkv provides the best latency--throughput balance.}
   Among strategies with sub-700\,ms TTFT P95 at rate\,=\,3.8 (\bidkv,
-  PE-SJF, H2O), \bidkv achieves the highest Goodput (3.16 vs.\ 2.97
-  and 2.67) and SLO (83.2\% vs.\ 79.9\% and 79.6\%).  The SRPT
-  strategies trade ${\geq}$1.2\,s TTFT P95 for higher throughput---a
+  PE-SJF, Largest-First), \bidkv achieves the highest Goodput (3.16 vs.\ 2.97
+  and 2.67) and SLO (83.2\% vs.\ 79.6\% and 79.9\%).  Static-Random
+  trades ${\geq}$1.2\,s TTFT P95 for higher throughput---a
   tradeoff that is unfavorable for latency-sensitive deployments.
 
 \item \textbf{Throughput reflects the SRPT tradeoff.}
@@ -764,11 +733,11 @@ Table~\ref{tab:main} presents the primary results at the medium arrival rate
 The layered comparison separates three groups of co-varying features:
 (1)~\emph{PE $\to$ PE-SJF} ($+$11.2\,pp SLO at 300ms):
   adding SJF waiting-queue ordering admits short-prompt requests earlier.
-(2)~\emph{PE-SJF $\to$ H2O-Style} ($+$0.3\,pp SLO at 300ms):
-  adding proactive reclamation and attention-based victim selection;
+(2)~\emph{PE-SJF $\to$ Largest-First} ($+$0.3\,pp SLO at 300ms):
+  adding proactive reclamation and capacity-greedy victim selection;
   the small SLO increment suggests that proactive reclamation alone, without
   coordinated cost signals, provides limited additional benefit.
-(3)~\emph{H2O-Style $\to$ BidKV} ($+$3.3\,pp SLO at 300ms):
+(3)~\emph{Largest-First $\to$ BidKV} ($+$3.3\,pp SLO at 300ms):
   replacing per-request heuristic scoring with coordinated utility-ratio
   selection and pressure-gated running reorder, yielding the largest
   single-step Goodput gain (6.4\%).
@@ -784,7 +753,7 @@ scales across three arrival rates.
 \centering
 \includegraphics[width=\textwidth]{figures/fig3_rate_sensitivity.pdf}
 \caption{Rate sensitivity (mixed workload, vLLM).  (a)~Goodput(500ms) vs.\
-  request rate: SRPT-enabled strategies (Static-Random, Uniform) lead at
+  request rate: SRPT-enabled strategies (Static-Random, Largest-First) lead at
   high rates; \bidkv leads among non-SRPT strategies.
   (b)~TTFT P95 vs.\ rate: \bidkv maintains the best or near-best tail
   latency at low and medium load; at high load, PE-SJF's zero-eviction
@@ -796,32 +765,30 @@ scales across three arrival rates.
 
 \emph{Low load (rate\,=\,2.0):}
 KV pressure is largely absorbed by rapid request turnover.  Most strategies
-achieve $\geq$92\% SLO(300ms), with \bidkv leading at 97.0\% (vs.\ Uniform
-96.6\%, Static-Random 96.5\%, PE-SJF 94.2\%).  \bidkv wins all five
+achieve $\geq$92\% SLO(300ms), with \bidkv leading at 97.0\% (vs.\
+Static-Random 96.5\%, PE-SJF 94.2\%).  \bidkv wins all four
 metrics at this rate, though the absolute margins are small---the
-Goodput spread among the top four strategies is $\leq$0.02\,req/s and
+throughput spread among the top strategies is $\leq$0.02\,req/s and
 all achieve $\geq$94\% SLO.
 
 \emph{Medium load (rate\,=\,3.8):}
 Sustained KV pressure forces proactive reclamation.  This is the primary
-differentiating regime.  Static-Random leads on Goodput (3.25), SLO (84.1\%),
-TPOT P95 (91\,ms), and Normalized Latency (60.4), all enabled by SRPT
-aggressive preemption.  However, its TTFT P95 (1216\,ms) is nearly 2$\times$
-that of \bidkv (631\,ms), which achieves the best tail latency while
-maintaining competitive SLO (83.2\%, second overall, $+$3.3\,pp over H2O).
-Among non-SRPT strategies, \bidkv leads on all five metrics, confirming that
-coordinated utility-based victim selection adds value beyond per-request
-heuristics.
+differentiating regime.  Static-Random leads on throughput and TPOT,
+enabled by SRPT aggressive preemption.  However, its TTFT P95 (1216\,ms) is
+nearly 2$\times$ that of \bidkv (631\,ms), which achieves the best tail
+latency while maintaining competitive SLO (83.2\%, $+$3.3\,pp over
+Largest-First).  Among non-SRPT strategies, \bidkv leads on all four
+metrics, confirming that coordinated utility-based victim selection adds
+value beyond per-request heuristics.
 
 \emph{High load (rate\,=\,5.7):}
 Pressure is intense; all strategies degrade.  SRPT-enabled strategies
-(Uniform, Static-Random) lead on throughput: Uniform achieves the highest
-Goodput (3.57) and SLO (81.6\%); Static-Random follows (3.56, 80.4\%).
-\bidkv (3.26, 81.0\%) ranks third on Goodput and second on SLO.
+(Static-Random, Largest-First) lead on throughput.
+\bidkv ranks competitively on SLO while maintaining lower TTFT.
 For TTFT P95, PE-SJF's zero-eviction approach yields the best tail latency
-(727\,ms), followed by H2O (793\,ms) and \bidkv (797\,ms)---a
-70\,ms gap (9\%) to PE-SJF.  However, PE-SJF's Goodput (2.80) is 14\% below
-\bidkv and its SLO (74.6\%) is 6.4\,pp lower, indicating that the tail
+(727\,ms), followed by Largest-First (793\,ms) and \bidkv (797\,ms)---a
+70\,ms gap (9\%) to PE-SJF.  However, PE-SJF's throughput is 14\% below
+\bidkv and its SLO is 6.4\,pp lower, indicating that the tail
 advantage does not translate to overall serving quality.
 
 \subsection{Reclamation Event Analysis}\label{sec:eval:mechanism}
@@ -843,18 +810,18 @@ rate\,=\,3.8 performance differences:
 \item \textbf{PE and PE-SJF} trigger zero proactive evictions, relying
   entirely on vLLM's reactive LIFO mechanism.  This avoids recompute cost
   but forfeits the opportunity to free memory for waiting requests, resulting
-  in high TTFT and low Goodput.
+  in high TTFT and low throughput.
 
-\item \textbf{H2O-Style} selects victims by per-request attention-weight
-  concentration, without considering cross-request recomputation cost.  This
-  occasionally targets near-complete requests whose recompute is expensive,
-  causing cascading pressure.
+\item \textbf{Largest-First} selects victims by KV occupancy, targeting the
+  request holding the most cache blocks.  Without considering cross-request
+  recomputation cost, this occasionally targets near-complete requests whose
+  recompute is expensive, causing cascading pressure.
 
 \item \textbf{\bidkv} uses the utility ratio $U = r / (\delta + \varepsilon)$
   to rank victims.  The disruption term~$\delta$ grows with completion progress
   and prior preemption count, steering selection toward requests whose
   eviction frees adequate capacity at low recompute cost.  This produces
-  the best combined Goodput and TTFT~P95.
+  the best combined throughput and TTFT~P95.
 \end{itemize}
 
 
@@ -947,11 +914,11 @@ alter final outputs, and the differentiation lies entirely in scheduling
 efficiency---which requests are reclaimed, how often, and at what
 recomputation cost.
 
-Through a seven-strategy evaluation on vLLM with Llama-3.1-8B-Instruct under
+Through a five-strategy evaluation on vLLM with Llama-3.1-8B-Instruct under
 mixed-length ShareGPT workloads, we showed that \bidkv achieves the best
-cross-rate SLO attainment (87.1\%) and TTFT P95 (562\,ms), outperforming
-both attention-based heuristics and default scheduling baselines.  At low
-load, \bidkv leads on all five metrics.  At higher load, strategies that
+cross-rate SLO attainment and TTFT P95, outperforming
+both capacity-greedy heuristics and default scheduling baselines.  At low
+load, \bidkv leads on all four metrics.  At higher load, strategies that
 enable aggressive SRPT preemption trade tail latency for throughput; \bidkv
 provides the best latency--throughput balance under sustained KV pressure.
 The value of coordinated reclamation is regime-dependent: the benefit is most
