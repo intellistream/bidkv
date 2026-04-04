@@ -41,10 +41,18 @@ STRATEGY_STYLE: dict[str, dict[str, Any]] = {
         "zorder": 5,
         "alpha": 0.85,
     },
-    "h2o-style": {
-        "label": "H2O-Style",
+    "largest-first": {
+        "label": "Largest-First",
         "color": "#f39c12",
         "marker": "^",
+        "size": 90,
+        "zorder": 4,
+        "alpha": 0.85,
+    },
+    "pe-sjf": {
+        "label": "PE-SJF",
+        "color": "#27ae60",
+        "marker": "s",
         "size": 90,
         "zorder": 4,
         "alpha": 0.85,
@@ -58,7 +66,7 @@ STRATEGY_STYLE: dict[str, dict[str, Any]] = {
         "alpha": 0.90,
     },
 }
-PLOT_STRATEGIES = ["pe-lifo", "h2o-style", "bidkv"]
+PLOT_STRATEGIES = ["pe-lifo", "largest-first", "pe-sjf", "bidkv"]
 
 
 def true_bidkv_u(c: dict) -> float:
@@ -441,13 +449,16 @@ def _print_stats(data: dict[str, Any]) -> None:
               f"{pct1:>7.1f}%")
     print("=" * 65)
     lifo_u_arr = data["strat_u"]["pe-lifo"]
-    h2o_u_arr = data["strat_u"]["h2o-style"]
+    lf_u_arr = data["strat_u"]["largest-first"]
+    sjf_u_arr = data["strat_u"]["pe-sjf"]
     bidkv_u_arr = data["strat_u"]["bidkv"]
     lifo_u = float(np.mean(lifo_u_arr)) if len(lifo_u_arr) > 0 else 1.0
-    h2o_u = float(np.mean(h2o_u_arr)) if len(h2o_u_arr) > 0 else 1.0
+    lf_u = float(np.mean(lf_u_arr)) if len(lf_u_arr) > 0 else 1.0
+    sjf_u = float(np.mean(sjf_u_arr)) if len(sjf_u_arr) > 0 else 1.0
     bidkv_u = float(np.mean(bidkv_u_arr)) if len(bidkv_u_arr) > 0 else 1.0
     print(f"  BidKV / LIFO = {bidkv_u/lifo_u:.1f}x  "
-          f"BidKV / H2O = {bidkv_u/h2o_u:.1f}x")
+          f"BidKV / Largest-First = {bidkv_u/lf_u:.1f}x  "
+          f"BidKV / PE-SJF = {bidkv_u/sjf_u:.1f}x")
     print()
 
 

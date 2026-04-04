@@ -59,14 +59,14 @@ def _get_strategies() -> dict[str, Any]:
     if _strategies is not None:
         return _strategies
     from bidkv.baselines.bidkv_strategy import BidKVStrategy
-    from bidkv.baselines.h2o_style import H2OStyleStrategy
+    from bidkv.baselines.largest_first import LargestFirstStrategy
     from bidkv.baselines.preempt_evict import PreemptEvictStrategy
-    from bidkv.baselines.slack_aware import SlackAwareStrategy
+    from bidkv.baselines.preempt_evict_sjf import PreemptEvictSJFStrategy
 
     _strategies = {
         "pe-lifo": PreemptEvictStrategy(),
-        "h2o-style": H2OStyleStrategy(),
-        "slack-aware": SlackAwareStrategy(),
+        "largest-first": LargestFirstStrategy(),
+        "pe-sjf": PreemptEvictSJFStrategy(),
         "bidkv": BidKVStrategy(),
     }
     return _strategies

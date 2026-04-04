@@ -44,6 +44,14 @@ COMP_FILE="$OUTPUT_DIR/completions.jsonl"
 PLOT_OUT_DIR="$OUTPUT_DIR"
 PORT=8000
 
+# 标准实验规格（与冒烟冻结环境完全一致）
+GPU_UTIL="0.5"
+GPU_BLOCKS="600"
+MAX_SEQS="32"
+MAX_MODEL_LEN="8192"
+RUNS="3"
+RATE="5.7"
+
 # ── 参数解析 ────────────────────────────────────────────────────────
 PLOT_ONLY=false
 for arg in "$@"; do
@@ -63,7 +71,7 @@ echo "=================================================================="
 echo "  Output dir  : $OUTPUT_DIR"
 echo "  Log file    : $LOG_FILE"
 echo "  Comp file   : $COMP_FILE"
-echo "  Config      : mixed/rate=5.7 | 300 blocks | 1 run | bidkv"
+echo "  Config      : mixed/rate=$RATE | $GPU_BLOCKS blocks | $RUNS runs | bidkv"
 echo "=================================================================="
 echo ""
 
@@ -77,40 +85,11 @@ if $PLOT_ONLY; then
     EVENT_COUNT=$(wc -l < "$LOG_FILE")
     echo "[INFO] Found $EVENT_COUNT events in $LOG_FILE"
 else
-    # ── Step 1: 创建精简 trace（前 300 条请求，加快实验速度）────────
+    # ── Step 1: 直接使用 frozen trace ──────────────────────────────
     echo "----------------------------------------------------------------"
-    echo "Step 1: 准备精简 trace (first 300 requests from mixed_rate5.7)"
+    echo "Step 1: 使用 frozen trace: $TRACES_DIR/mixed_rate${RATE}.json (1000 requests)"
     echo "----------------------------------------------------------------"
-    MINI_TRACE="$OUTPUT_DIR/mixed_rate5.7.json"
-
-    $CONDA_PY - <<'PYEOF'
-import json, sys, pathlib
-
-src = pathlib.Path("experiments/vllm/traces/mixed_rate5.7.json")
-dst = pathlib.Path("results/preliminary_motivation/mixed_rate5.7.json")
-
-data = json.loads(src.read_text())
-requests = data["requests"]
-
-# 取前 300 条，保留原始 arrival_time_ms（Poisson 分布保持不变）
-N = 300
-subset = requests[:N]
-
-# 调整时间戳：将第一条的到达时间归零
-if subset:
-    t0 = subset[0]["arrival_time_ms"]
-    for r in subset:
-        r["arrival_time_ms"] = r["arrival_time_ms"] - t0
-
-data["requests"] = subset
-data["num_requests"] = N
-data["dataset_source"] = f"mixed_rate5.7 (first {N} requests for motivation experiment)"
-
-dst.parent.mkdir(parents=True, exist_ok=True)
-dst.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-print(f"[OK] Mini trace saved: {dst} ({N} requests)")
-PYEOF
-
+    echo "[OK] Trace: $TRACES_DIR/mixed_rate${RATE}.json"
     echo ""
 
     # ── Step 2: 清除旧日志（若存在）────────────────────────────────
@@ -126,25 +105,28 @@ PYEOF
     echo "----------------------------------------------------------------"
     echo "Step 2: Run vLLM with bidkv strategy + preemption event logger"
     echo "         BIDKV_LOG_PREEMPTION_EVENTS=$LOG_FILE"
-    echo "         num-gpu-blocks-override=300 (2× tighter than standard)"
+    echo "         num-gpu-blocks-override=$GPU_BLOCKS (standard frozen env)"
+    echo "         runs=$RUNS  requests=1000  rate=$RATE"
     echo "----------------------------------------------------------------"
     echo ""
 
     export BIDKV_LOG_PREEMPTION_EVENTS="$LOG_FILE"
     export BIDKV_LOG_COMPLETIONS="$COMP_FILE"
-    export BIDKV_LOG_KV_THRESHOLD="0.78"  # 触发阈值稍低，捕获更多事件
+    export BIDKV_LOG_KV_THRESHOLD="0.80"
 
     $CONDA_PY -m bidkv.experiments.vllm.runner \
         --strategies "bidkv" \
         --workloads "mixed" \
-        --runs 1 \
-        --mixed-rates "5.7" \
+        --runs $RUNS \
+        --mixed-rates "$RATE" \
         --output-dir "$OUTPUT_DIR" \
-        --traces-dir "$OUTPUT_DIR" \
+        --traces-dir "$TRACES_DIR" \
         --model "$MODEL" \
-        --gpu-memory-utilization 0.85 \
-        --max-model-len 8192 \
-        --num-gpu-blocks-override 300 \
+        --gpu-memory-utilization $GPU_UTIL \
+        --max-model-len $MAX_MODEL_LEN \
+        --num-gpu-blocks-override $GPU_BLOCKS \
+        --max-num-seqs $MAX_SEQS \
+        --block-size 16 \
         --port $PORT \
         2>&1 | tee "$OUTPUT_DIR/capture_run.log"
 
