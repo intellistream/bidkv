@@ -223,7 +223,9 @@ class SGLangExperimentRunner:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                no_proxy_handler = urllib.request.ProxyHandler({})
+                opener = urllib.request.build_opener(no_proxy_handler)
+                with opener.open(req, timeout=60) as resp:
                     resp.read()
             except Exception as exc:
                 logger.warning("Warmup request %d failed: %s", i, exc)
@@ -495,6 +497,24 @@ def _parse_args() -> argparse.Namespace:
         help="SGLang server port",
     )
     parser.add_argument(
+        "--max-total-tokens",
+        type=int,
+        default=16384,
+        help="Max KV cache tokens (--max-total-tokens). Use ~9600 to match vLLM KV pressure.",
+    )
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        default=False,
+        help="Pass --disable-cuda-graph to SGLang (needed in environments without nvcc).",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        default=None,
+        help="SGLang attention backend (e.g. triton, torch_native). Default: auto.",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         default=False,
@@ -532,6 +552,9 @@ def main() -> None:
         server=SGLangServerConfig(
             model=args.model,
             port=args.port,
+            max_total_tokens=args.max_total_tokens,
+            disable_cuda_graph=args.disable_cuda_graph,
+            attention_backend=args.attention_backend,
         ),
         traces_dir=Path(args.traces_dir),
     )

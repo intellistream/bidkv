@@ -580,18 +580,20 @@ class _AdapterMetrics(BaseAdapterMetrics):
 
 
 def _get_token_to_kv_pool(scheduler: Any) -> Any | None:
-    """从 SGLang scheduler 获取 TokenToKVPool。
+    """从 SGLang scheduler 获取 KV pool（allocator 或 pool）。
 
-    SGLang 的 KV 内存管理通过 ``TokenToKVPool`` 实现，
-    它提供 ``size`` 和 ``available_size()`` 接口。
+    SGLang >= 0.5.x 使用 ``token_to_kv_pool_allocator``（BaseTokenToKVPoolAllocator），
+    直接暴露 ``size`` 属性和 ``available_size()`` 方法。
     """
-    # SGLang 版本差异：pool 可能在不同属性路径下
-    # 优先检查 tp_server -> token_to_kv_pool
+    # SGLang >= 0.5.x: token_to_kv_pool_allocator（首选路径）
+    if hasattr(scheduler, "token_to_kv_pool_allocator"):
+        return scheduler.token_to_kv_pool_allocator
+    # 旧版 SGLang: 直接属性
+    if hasattr(scheduler, "token_to_kv_pool"):
+        return scheduler.token_to_kv_pool
+    # 旧版 SGLang: tp_server 下
     if hasattr(scheduler, "tp_server"):
         tp = scheduler.tp_server
         if hasattr(tp, "token_to_kv_pool"):
             return tp.token_to_kv_pool
-    # 直接属性
-    if hasattr(scheduler, "token_to_kv_pool"):
-        return scheduler.token_to_kv_pool
     return None

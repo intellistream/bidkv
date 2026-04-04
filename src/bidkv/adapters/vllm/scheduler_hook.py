@@ -115,6 +115,11 @@ def uninstall_scheduler_hook(scheduler: Any, adapter: VLLMAdapter) -> None:  # n
         if attr.startswith(_ORIG_PREFIX) or attr == "_bidkv_adapter":
             delattr(scheduler, attr)
 
+    # Close preemption logger if active (flushes and releases file handle)
+    from bidkv.adapters.vllm import preemption_logger as _plogger
+
+    _plogger.close_logger()
+
     logger.info("BidKV scheduler hooks removed from vLLM Scheduler")
 
 
@@ -818,6 +823,14 @@ def _patched_schedule(scheduler: Any, adapter: VLLMAdapter) -> Any:
     # Calls strategy.select_victims() to rank running requests
     _refresh_priority_cache(scheduler, adapter)
 
+    # Motivation experiment: log preemption candidate snapshot (opt-in via env var).
+    # Called BEFORE any reordering so all strategies see the same raw queue.
+    # Activated only when BIDKV_LOG_PREEMPTION_EVENTS is set (zero overhead otherwise).
+    from bidkv.adapters.vllm import preemption_logger as _plogger
+
+    if _plogger.is_active():
+        _plogger.log_event_if_enabled(scheduler, adapter)
+
     # Proactive preemption using cached priority (all except preempt-evict)
     # Uses select_victims() priority to pick victim when KV > 90%.
     # This is the ONLY proactive mechanism for slack-aware (SRPT excluded
@@ -882,9 +895,16 @@ def _patched_update_from_output(
 
 def _patched_free_request(scheduler: Any, adapter: VLLMAdapter, request: Any, **kwargs: Any) -> Any:
     """Patched _free_request() — 请求完成时清理 BidKV 状态。"""
-    # 先清理 BidKV 状态
     request_id = getattr(request, "request_id", None)
     if request_id is not None:
+        # 记录最终 output token 数，用于前置实验 completion_ratio join
+        from bidkv.adapters.vllm import preemption_logger as _plogger
+        if _plogger.is_active():
+            num_computed = getattr(request, "num_computed_tokens", 0)
+            num_prompt = getattr(request, "num_prompt_tokens", 0)
+            final_output = max(0, num_computed - num_prompt)
+            _plogger.log_completion(request_id, final_output)
+
         adapter.on_request_complete(request_id)
 
     # 调用原始方法（透传所有额外参数，如 delay_free_blocks）

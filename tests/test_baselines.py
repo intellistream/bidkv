@@ -477,32 +477,39 @@ class TestBidKV:
             assert "bid_id" in action.metadata
             assert "utility" in action.metadata
 
-    def test_completion_aware_ordering(self) -> None:
-        """高 completion 请求应排在后面（受保护），低 completion 优先驱逐。"""
+    def test_recompute_cost_aware_ordering(self) -> None:
+        """高 output/prompt 比率（廉价 recompute + 大量真实 KV 释放）的请求优先被驱逐。
+
+        req-cheap: prompt=100, output=300 → recompute_norm=0.39, U=300/(0.39+...)=high
+        req-expensive: prompt=450, output=10 → recompute_norm=1.76, U=10/1.76=very low
+        """
         candidates = [
             RequestState(
-                "req-low",
+                "req-expensive-recompute",  # long prompt, tiny output
                 current_tokens=500,
                 token_ids=tuple(range(500)),
                 num_prompt_tokens=450,
-                num_computed_tokens=460,
+                num_computed_tokens=460,  # output_tokens=10
                 max_output_tokens=256,
             ),
             RequestState(
-                "req-high",
-                current_tokens=500,
-                token_ids=tuple(range(500)),
-                num_prompt_tokens=200,
-                num_computed_tokens=430,
-                max_output_tokens=256,
+                "req-cheap-recompute",  # short prompt, lots of output
+                current_tokens=400,
+                token_ids=tuple(range(400)),
+                num_prompt_tokens=100,
+                num_computed_tokens=400,  # output_tokens=300
+                max_output_tokens=512,   # 300/512=58%, not near done
             ),
         ]
         strategy = BidKVStrategy()
         actions = strategy.select_victims(candidates, needed_tokens=100)
         assert len(actions) >= 1
-        # req-low has ~4% completion → low delta → high U → first victim
-        # req-high has ~90% completion → high delta → low U → protected
-        assert actions[0].request_id == "req-low"
+        # req-cheap: output=300, recompute_norm=0.39, completion=0.59, late_penalty=0.70
+        #            quality_delta=0.39+0.70=1.09, U=300/1.09=275
+        # req-expensive: output=10, recompute_norm=1.76, late_penalty≈0
+        #            quality_delta=1.76, U=10/1.76=5.7
+        # req-cheap-recompute evicted first (high output_tokens, cheap re-prefill)
+        assert actions[0].request_id == "req-cheap-recompute"
 
     def test_anti_starvation(self) -> None:
         """Previously preempted requests should be protected (higher delta)."""
@@ -532,11 +539,11 @@ class TestBidKV:
         # req-fresh has same completion but 0 preemptions → lower delta → first victim
         assert actions[0].request_id == "req-fresh"
 
-    def test_freed_dominant_over_completion(self) -> None:
-        """A much bigger request is evicted first even if near completion.
+    def test_output_tokens_dominant_over_small_output(self) -> None:
+        """Large output_tokens dominate even with late_penalty from high completion.
 
-        With delta = 1+2*completion, the max protection ratio is 3×.
-        A request >3× bigger always wins in utility despite completion.
+        req-large-old: output=500 tokens, short prompt → high U despite late_penalty.
+        req-small-young: output=5 tokens, long prompt → U≈0 (tiny freed, high recompute).
         """
         candidates = [
             RequestState(
@@ -544,7 +551,7 @@ class TestBidKV:
                 current_tokens=200,
                 token_ids=tuple(range(200)),
                 num_prompt_tokens=190,
-                num_computed_tokens=195,
+                num_computed_tokens=195,  # output_tokens=5
                 max_output_tokens=256,
                 num_preemptions=0,
             ),
@@ -553,7 +560,7 @@ class TestBidKV:
                 current_tokens=800,
                 token_ids=tuple(range(800)),
                 num_prompt_tokens=200,
-                num_computed_tokens=700,
+                num_computed_tokens=700,  # output_tokens=500
                 max_output_tokens=256,
                 num_preemptions=0,
             ),
@@ -561,9 +568,12 @@ class TestBidKV:
         strategy = BidKVStrategy()
         actions = strategy.select_victims(candidates, needed_tokens=100)
         assert len(actions) >= 1
-        # req-large-old: 800 freed, ~completion 500/256→1.0, delta=3.0, U≈267
-        # req-small-young: 200 freed, ~completion 5/256≈0.02, delta≈1.04, U≈192
-        # Large one evicted first (freed dominates despite high completion)
+        # req-large-old: output=500, recompute_norm=200/256=0.78,
+        #   completion=500/256→1.0, late_penalty=1²*2=2.0,
+        #   quality_delta=0.78+2.0=2.78, U=500/2.78=180
+        # req-small-young: output=5, recompute_norm=190/256=0.742,
+        #   quality_delta=0.742, U=5/0.742=6.7
+        # Large output wins despite high completion penalty
         assert actions[0].request_id == "req-large-old"
 
     def test_empty_candidates(self) -> None:

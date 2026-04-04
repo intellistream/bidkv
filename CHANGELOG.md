@@ -6,6 +6,94 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **BidKV `select_victims()` 公式重构（基于 recompute 代价感知）**：
+  - `bidkv_strategy.py`: 将 `tokens_freed = current_tokens` 改为 `tokens_freed = output_tokens`
+    (`= num_computed_tokens - num_prompt_tokens`)，仅计算 decode 阶段 KV。
+    SGLang RadixAttention 中 prompt KV 是 prefix-cached 共享的，evict 时实际不释放；
+    旧公式高估长 prompt 请求的 KV 释放量，导致选出高重算代价受害者。
+  - `quality_delta` 从 `1 + 0.5*completion + starvation*0.3` 改为
+    `recompute_norm + late_penalty + starvation_penalty`，其中：
+    - `recompute_norm = max(0.5, prompt_tokens / 256)` — 长 prompt → δ 增大 → U 降低
+    - `late_penalty = completion² × 2` — 接近完成的请求获得保护
+    - `starvation_penalty = num_preemptions × 0.5`（权重从 0.3 调高为 0.5）
+  - 新增 fallback 路径：`num_computed_tokens == 0` 时退回简化公式
+    `U = current_tokens / (1 + starvation)`，兼容 num_computed 不可用的场景。
+
+- **`_proactive_preempt` 加 guard 防止无效驱逐**：
+  - `adapters/sglang/scheduler_hook.py`: 当 `select_victims()` 返回空（所有请求
+    output_tokens ≤ 2）时，所有请求被赋予 catch-all priority=100，旧代码会随机驱逐
+    一个"非受害者"。新增 `if scored_reqs[0][0] >= 10.0: return` guard，仅在有明确
+    合格受害者（priority < 10，即由 select_victims 指定）时才执行主动驱逐。
+
+- **测试更新** (`tests/test_baselines.py`)：
+  - `test_completion_aware_ordering` → `test_recompute_cost_aware_ordering`：
+    测试语义从"低 completion 优先"更新为"低 recompute_norm + 高 output_tokens 优先"。
+  - `test_freed_dominant_over_completion` → `test_output_tokens_dominant_over_small_output`：
+    更新注释中的公式数值（断言不变：大 output_tokens 仍胜过小 output_tokens）。
+  - 467 tests pass（1 个已知失败：vLLM 未安装环境检测）。
+
+  - `adapters/sglang/adapter.py` `_get_token_to_kv_pool()`: SGLang >= 0.5.x uses
+    `scheduler.token_to_kv_pool_allocator` (a `BaseTokenToKVPoolAllocator` with `.size`
+    and `.available_size()`). The old code checked `scheduler.tp_server.token_to_kv_pool`
+    and `scheduler.token_to_kv_pool` — both always absent → returned `None` → `(0, 0)`.
+    Now `token_to_kv_pool_allocator` is checked first.
+  - This fix unblocks ALL pressure-triggered logic (`_proactive_preempt`, `_proactive_srpt`)
+    which were silently dead because `usage = 0/total` was always `0 < threshold`.
+
+- **Stale `current_tokens` in BidKV bid scoring**:
+  - `adapters/sglang/scheduler_hook.py` `_build_running_candidates()`: `current_tokens`
+    (used as `tokens_freed` in `U = tokens_freed / (δ+ε)`) was set from the initial
+    prompt token list — never updated during decode. Now uses `num_computed_tokens` from
+    the live request object, which grows each decode step. Falls back to `len(token_ids)`
+    when `num_computed_tokens` is 0 (start-of-decode edge case).
+
+### Changed
+
+- **Proactive preemption thresholds and cooldown tightened**:
+  - `_proactive_preempt`: threshold `0.90 → 0.85`, cooldown `5.0s → 2.0s`.
+    At >95% KV usage, now selects 2 victims per cycle (was always 1) for faster relief.
+  - `_proactive_srpt`: threshold `0.80 → 0.75`, cooldown `1.5s → 0.8s`.
+
+- **Priority cache refresh interval: 3.0s → 0.5s**:
+  - `_refresh_priority_cache`: More frequent scoring refresh ensures `bidkv`'s
+    `U`-based victim ordering responds quickly to decode-step token growth.
+
+### Added
+
+- **SGLang validation support for extended strategies (preempt-evict-sjf, h2o-style)**:
+  - `experiments/sglang/config.py`: Added `STRATEGY_PREEMPT_EVICT_SJF` / `STRATEGY_H2O_STYLE`
+    constants, `EXTENDED_STRATEGIES` tuple (5 items), and updated `STRATEGY_BASELINE_MAP`.
+    `ALL_STRATEGIES` remains the frozen 3 (backward-compatible alias of `FROZEN_STRATEGIES`).
+    `SGLangExperimentConfig.__post_init__` now validates against `EXTENDED_STRATEGIES`.
+  - `adapters/sglang/scheduler_hook.py`: Added `preempt-evict-sjf` to the skip lists in
+    `_reorder_running_for_preemption`, `_refresh_priority_cache`, `_proactive_preempt`,
+    and `_proactive_srpt` — symmetric with vLLM design (SJF admission + LIFO eviction ablation).
+  - `experiments/sglang/config.py`: `SGLangServerConfig.to_cli_args()` now emits
+    `--max-total-tokens` for KV pressure control (was missing, field existed but unused).
+  - `experiments/sglang/runner.py`: Added `--max-total-tokens` CLI argument
+    (default 16384; use 9600 to match vLLM's `--num-gpu-blocks-override 600`).
+  - `scripts/run_sglang_validation_v1.sh`: New validation script running
+    bidkv / preempt-evict-sjf / h2o-style on mixed workload rate=3.8, 1 run,
+    max-total-tokens=9600 to match vLLM KV pressure.
+  - `experiments/sglang/config.py`: Added `attention_backend` field to `SGLangServerConfig`;
+    `to_cli_args()` now emits `--attention-backend` when set.
+  - `experiments/sglang/runner.py`: Added `--attention-backend` CLI argument
+    (default None = SGLang auto-select).
+  - Environment fix: `CUDA_HOME=/usr/local/cuda-12.8` added to script; `cuda-nvcc-12-8`
+    installed via NVIDIA apt repo to satisfy flashinfer 0.6.3 JIT compilation
+    (`cudaLaunchKernelEx` requires CUDA ≥ 12.0, system had only nvcc 11.5).
+  - 131/131 unit tests pass.
+
+### Results (sglang_validation_v1)
+
+  - All 3 strategies completed: 1000/1000 requests, 0 crashes.
+  - mixed workload, rate=3.8, 1 run each:
+    - bidkv: tput=3.61 rps, p95_ttft=4729 ms
+    - preempt-evict-sjf: tput=3.62 rps, p95_ttft=4363 ms
+    - h2o-style: tput=3.60 rps, p95_ttft=5268 ms
+  - Results in `results/sglang_validation_v1/`.
+
+### Changed
 - **Comprehensive data analysis guide in copilot-instructions** (2026-04-03):
   - Replaced brief JSON format snippet with full 8-section analysis reference
   - Added file naming convention, all 13 top-level keys, all 10 request fields

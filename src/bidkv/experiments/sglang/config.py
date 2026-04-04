@@ -11,22 +11,42 @@ from pathlib import Path
 
 from bidkv.experiments.common.model import get_default_model
 
-# ── 策略（v2.3 冻结版本）─────────────────────────────────────────
+# ── 策略（v2.3 冻结版本，3 策略核心）────────────────────────────────
 STRATEGY_SGLANG_DEFAULT = "sglang_default"  # SGLang native (= Preempt-Evict)
 STRATEGY_SLACK_AWARE = "slack_aware"  # 强无-bid 系统对手
 STRATEGY_BIDKV = "bidkv"  # BidKV 完整 bid pipeline
 
-ALL_STRATEGIES: tuple[str, ...] = (
+# ── 扩展策略（验证性实验使用，非 v2.3 冻结 54-run 计划范围）────────────
+STRATEGY_PREEMPT_EVICT_SJF = "preempt-evict-sjf"  # SJF admission + LIFO eviction 消融
+STRATEGY_H2O_STYLE = "h2o-style"  # attention-based heuristic
+
+# v2.3 冻结正式策略（54-run 计划使用）
+FROZEN_STRATEGIES: tuple[str, ...] = (
     STRATEGY_SGLANG_DEFAULT,
     STRATEGY_SLACK_AWARE,
     STRATEGY_BIDKV,
 )
 
+# 向后兼容别名 = 冻结策略（默认实验配置不变）
+ALL_STRATEGIES: tuple[str, ...] = FROZEN_STRATEGIES
+
+# 所有允许的策略（包含扩展验证策略）
+EXTENDED_STRATEGIES: tuple[str, ...] = (
+    STRATEGY_SGLANG_DEFAULT,
+    STRATEGY_SLACK_AWARE,
+    STRATEGY_BIDKV,
+    STRATEGY_PREEMPT_EVICT_SJF,
+    STRATEGY_H2O_STYLE,
+)
+
 # SGLang 策略名 → BaselineRegistry 内部名映射
+# 未在此映射中的策略名直接用作 registry key（fallback = identity）
 STRATEGY_BASELINE_MAP: dict[str, str] = {
     STRATEGY_SGLANG_DEFAULT: "preempt-evict",
     STRATEGY_SLACK_AWARE: "slack-aware",
     STRATEGY_BIDKV: "bidkv",
+    STRATEGY_PREEMPT_EVICT_SJF: "preempt-evict-sjf",
+    STRATEGY_H2O_STYLE: "h2o-style",
 }
 
 # ── 工作负载 ──────────────────────────────────────────────────────
@@ -88,6 +108,10 @@ class SGLangServerConfig:
     max_total_tokens: int = 16384
     host: str = "127.0.0.1"
     port: int = 30000
+    disable_cuda_graph: bool = False
+    # Use triton backend to avoid flashinfer/sgl_kernel .so incompatibility with torch 2.6.0.
+    # triton was the attention backend used in all previous sglang experiments (v1/v2/v3).
+    attention_backend: str = "triton"
 
     @property
     def base_url(self) -> str:
@@ -99,7 +123,7 @@ class SGLangServerConfig:
 
     def to_cli_args(self) -> list[str]:
         """生成 sglang serve 命令行参数。"""
-        return [
+        args = [
             "--model",
             self.model,
             "--mem-fraction-static",
@@ -109,6 +133,13 @@ class SGLangServerConfig:
             "--port",
             str(self.port),
         ]
+        if self.max_total_tokens > 0:
+            args += ["--max-total-tokens", str(self.max_total_tokens)]
+        if self.disable_cuda_graph:
+            args += ["--disable-cuda-graph"]
+        if self.attention_backend is not None:
+            args += ["--attention-backend", self.attention_backend]
+        return args
 
 
 @dataclass(frozen=True)
@@ -156,6 +187,10 @@ class SGLangExperimentConfig:
         return f"sglang__{strategy}__{workload}__rate{rate}__run{run_index}"
 
     def __post_init__(self) -> None:
-        unknown = set(self.strategies) - set(ALL_STRATEGIES)
+        unknown = set(self.strategies) - set(EXTENDED_STRATEGIES)
         if unknown:
-            raise ValueError(f"Unknown strategies: {unknown}. Valid: {ALL_STRATEGIES}")
+            raise ValueError(
+                f"Unknown strategies: {unknown}. "
+                f"Valid (frozen): {FROZEN_STRATEGIES}. "
+                f"Valid (extended): {EXTENDED_STRATEGIES}"
+            )

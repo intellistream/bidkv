@@ -4,18 +4,26 @@
 scorer-agnostic：支持任意实现 ScoringStrategy 的评分器，
 默认使用 PositionalScoring。
 
-选择公式：U = r / (δ + ε)，greedy by U（Algorithm 1）。
+选择公式：U = output_tokens / (δ + ε)，greedy by U（Algorithm 1）。
 
 Mode A 语义（request-level preemption）
 --------------------------------------
-δ = 1 + 0.5·completion + starvation_penalty
-- freed 数量为主信号（效率优先：大请求释放更多 KV）
-- completion 为轻量次信号（max ratio 1.5×，freed 强主导）
-- anti-starvation：被反复 preempt 的请求分母递增
+δ = recompute_norm + late_penalty + starvation
 
-max ratio = 1.5×（completion 0% 与 100% 之间），确保 freed 强主导排序。
-低 completion weight 使 victim ordering 接近最优的 freed-first，同时保留
-anti-starvation 以防止 cascading preemption（区别于 h2o-style）。
+- tokens_freed = output_tokens（decode 阶段 KV）
+  prompt KV 在 SGLang RadixAttention 中为 prefix-cached 共享，evict
+  时实际只释放 output 阶段的 KV；用 output_tokens 避免高估长 prompt 请求。
+- recompute_norm = prompt_tokens / 256（prompt 长度归一化）
+  prefill 重算代价正比于 prompt 长度，长 prompt 请求 δ 增大 → U 降低 →
+  BidKV 主动回避高重算代价的驱逐决策。
+- late_penalty = completion² × 2（接近完成的请求获得保护）
+  completion = output_tokens / max_output_tokens；接近完成时 δ 二次增大，
+  保护"很快就能自然释放 KV"的请求不被意外驱逐。
+- starvation = num_preemptions × 0.5（anti-starvation）
+  被多次 preempt 的请求 δ 递增，防止 cascading 连续驱逐同一请求。
+
+Fallback（num_computed_tokens 不可用时）：
+  回退到简化公式 U = current_tokens / (1 + starvation)。
 """
 
 from __future__ import annotations
@@ -70,11 +78,15 @@ class BidKVStrategy(BaselineStrategy):
     ) -> list[CompressionAction]:
         """Mode A: 质量感知的请求级驱逐排序。
 
-        quality_delta = 1 + 2*completion + starvation
+        U = output_tokens / (recompute_norm + late_penalty + starvation + ε)
 
-        - freed 主导排序（高效回收 KV 空间）
-        - completion 提供 ≤3× 的次级保护
-        - anti-starvation 保护被反复 preempt 的请求
+        - output_tokens = num_computed - num_prompt（仅 decode phase KV）
+        - recompute_norm = prompt_tokens / 256（重算代价归一化）
+        - late_penalty = completion² × 2（保护接近完成的请求）
+        - starvation = num_preemptions × 0.5（防止 cascading 驱逐）
+
+        当 num_computed_tokens == 0（信息不可用）时，回退到简化公式：
+        U = current_tokens / (1 + starvation)。
 
         Parameters
         ----------
@@ -99,29 +111,63 @@ class BidKVStrategy(BaselineStrategy):
             if req.current_tokens <= 1:
                 continue
 
-            tokens_freed = req.current_tokens
+            # ----------------------------------------------------------------
+            # Compute output tokens: decode-phase KV only.
+            # Prompt KV may be prefix-cached (SGLang RadixAttention) and
+            # is NOT actually freed when the request is aborted.  Using
+            # output_tokens avoids over-valuing long-prompt requests that
+            # are expensive to re-prefill but free little unique KV.
+            # ----------------------------------------------------------------
+            output_tokens = max(0, req.num_computed_tokens - req.num_prompt_tokens)
 
-            # Compute completion ratio: 0 (just started) → 1 (done)
-            output_generated = max(0, req.num_computed_tokens - req.num_prompt_tokens)
-            completion = 0.0
-            if req.max_output_tokens > 0:
-                completion = min(1.0, output_generated / req.max_output_tokens)
+            if output_tokens > 2:
+                # ----------------------------------------------------------
+                # Primary path: recompute-cost-aware formula
+                # ----------------------------------------------------------
+                tokens_freed = output_tokens
 
-            # quality_delta = 1 + 0.5*completion + starvation
-            # ─────────────────────────────────────────────────
-            # Denominator always ≥ 1, so U ≤ freed.
-            # Max protection ratio (completion 0→1) is 1.5×.
-            # freed strongly dominates ordering — victim selection
-            # closely tracks freed-first (like h2o-style) for
-            # differently-sized requests, with completion providing
-            # only a mild tiebreaker. Anti-starvation (+0.3 per
-            # prior preemption) is the primary differentiator.
-            quality_delta = 1.0 + 0.5 * completion
+                # Recompute cost: proportional to prompt length.
+                # A 512-token prompt costs 2× the re-prefill of a 256-token one.
+                recompute_norm = max(0.5, req.num_prompt_tokens / 256.0)
 
-            # Anti-starvation: previously preempted requests get
-            # additional denominator weight to reduce their utility.
-            if req.num_preemptions > 0:
-                quality_delta += req.num_preemptions * 0.3
+                # Near-completion penalty: protect almost-done requests.
+                # They will free KV naturally very soon; evicting them now
+                # wastes their accumulated decoding work.
+                completion = 0.0
+                if req.max_output_tokens > 0:
+                    completion = min(1.0, output_tokens / req.max_output_tokens)
+                late_penalty = completion * completion * 2.0
+
+                # Anti-starvation: previously preempted requests are penalized
+                # to prevent cascading evictions of the same request.
+                starvation_penalty = req.num_preemptions * 0.5
+
+                quality_delta = max(0.1, recompute_norm + late_penalty + starvation_penalty)
+
+                metadata: dict = {
+                    "output_tokens": output_tokens,
+                    "recompute_norm": round(recompute_norm, 4),
+                    "completion": round(completion, 4),
+                    "num_preemptions": req.num_preemptions,
+                    "mode": "A",
+                    "path": "primary",
+                }
+            else:
+                # ----------------------------------------------------------
+                # Fallback: num_computed_tokens unavailable or request
+                # just started decode (output_tokens ≤ 2).
+                # Use simplified formula: U = current_tokens / (1 + starvation).
+                # ----------------------------------------------------------
+                tokens_freed = req.current_tokens
+                quality_delta = max(0.1, 1.0 + req.num_preemptions * 0.5)
+
+                metadata = {
+                    "output_tokens": output_tokens,
+                    "completion": 0.0,
+                    "num_preemptions": req.num_preemptions,
+                    "mode": "A",
+                    "path": "fallback",
+                }
 
             bid = CompressionBid(
                 bid_id=make_bid_id(req.request_id, 0),
@@ -131,11 +177,7 @@ class BidKVStrategy(BaselineStrategy):
                 quality_delta=quality_delta,
                 compress_latency_ms=0.0,
                 confidence=0.8,
-                metadata={
-                    "completion": round(completion, 4),
-                    "num_preemptions": req.num_preemptions,
-                    "mode": "A",
-                },
+                metadata=metadata,
             )
             pool_mgr.submit_bids(req.request_id, [bid])
 

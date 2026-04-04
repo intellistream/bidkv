@@ -118,8 +118,11 @@ class SGLangServer:
                     f"Output:\n{log_text}"
                 )
             try:
+                # Use a no-proxy opener to bypass HTTP_PROXY for local connections.
+                no_proxy_handler = urllib.request.ProxyHandler({})
+                opener = urllib.request.build_opener(no_proxy_handler)
                 req = urllib.request.Request(health_url, method="GET")
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with opener.open(req, timeout=5) as resp:
                     if resp.status == 200:
                         logger.info("SGLang server healthy")
                         return

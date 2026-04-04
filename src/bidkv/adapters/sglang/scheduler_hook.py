@@ -16,15 +16,16 @@
 
 策略分化表（3 策略）：
 
-+-----------------+-----------------------+-------------------+--------------------+
-| 层面            | sglang_default        | slack_aware       | bidkv              |
-+=================+=======================+===================+====================+
-| Waiting 排序    | FCFS (无排序)         | EDF (到达序)      | SJF (prompt_tokens)|
-| Running 排序    | LIFO (无排序)         | cached prio       | cached prio        |
-| select_victims  | N/A                   | slack-based       | U = r/(δ+ε)       |
-| SRPT 主动驱逐   | ❌                    | ❌                | ✅                 |
-| Proactive       | ❌                    | ✅                | ✅                 |
-+-----------------+-----------------------+-------------------+--------------------+
++-----------------------+---------+------------+---------+----------+
+| 层面                  | sglang  | pe-sjf     | h2o     | bidkv    |
+|                       | default |            | style   |          |
++=======================+=========+============+=========+==========+
+| Waiting 排序          | FCFS    | SJF(cmp)   | SJF     | SJF      |
+| Running 排序          | LIFO    | LIFO       | cached  | cached   |
+| select_victims        | N/A     | N/A        | attn    | U=r/(δ+ε)|
+| SRPT 主动驱逐         | ❌      | ❌         | ✅      | ✅       |
+| Proactive             | ❌      | ❌         | ✅      | ✅       |
++-----------------------+---------+------------+---------+----------+
 
 设计原则：
 - **纯 Mode A**：策略只做 decision（谁被 preempt），不做 execution
@@ -308,7 +309,8 @@ def _reorder_running_for_preemption(scheduler: Any, adapter: SGLangAdapter) -> N
     strategy_name = adapter._experiment_strategy_name
 
     # sglang_default: NO reorder — measures pure SGLang default behavior.
-    if strategy_name in ("sglang_default", "preempt-evict"):
+    # preempt-evict-sjf: NO reorder — LIFO eviction, SJF admission only ablation.
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf"):
         return
 
     running_ref = _get_running_batch_requests_ref(scheduler)
@@ -346,7 +348,7 @@ def _refresh_priority_cache(scheduler: Any, adapter: SGLangAdapter) -> None:
     Called every 3 seconds. Runs strategy.select_victims() to get the
     priority ordering, then caches it for _reorder_running_for_preemption.
     """
-    refresh_interval_s = 3.0
+    refresh_interval_s = 0.5
     now = time.monotonic()
     if now - adapter._last_priority_refresh < refresh_interval_s:
         return
@@ -355,8 +357,8 @@ def _refresh_priority_cache(scheduler: Any, adapter: SGLangAdapter) -> None:
     strategy = adapter._experiment_strategy
     strategy_name = adapter._experiment_strategy_name
 
-    # sglang_default: no priority cache needed
-    if strategy_name in ("sglang_default", "preempt-evict") or strategy is None:
+    # sglang_default / preempt-evict-sjf: no priority cache needed
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf") or strategy is None:
         return
 
     running_reqs = _get_running_requests(scheduler)
@@ -397,16 +399,17 @@ def _refresh_priority_cache(scheduler: Any, adapter: SGLangAdapter) -> None:
 def _proactive_preempt(scheduler: Any, adapter: SGLangAdapter) -> None:
     """Proactive preemption when KV pressure exceeds threshold.
 
-    Selects a SINGLE victim via cached priority and aborts it.
+    Selects 1 victim via cached priority and aborts it.
+    When usage > 95%, selects 2 victims for faster pressure relief.
 
     Guards:
-    - KV utilization > 90%
+    - KV utilization > 85%
     - Waiting queue non-empty
     - At least 3 running requests
-    - 5-second cooldown
+    - 2-second cooldown
     - sglang_default: skip entirely
     """
-    cooldown_s = 5.0
+    cooldown_s = 2.0
     now = time.monotonic()
     last_proactive = getattr(scheduler, "_bidkv_last_proactive", 0.0)
     if now - last_proactive < cooldown_s:
@@ -424,45 +427,59 @@ def _proactive_preempt(scheduler: Any, adapter: SGLangAdapter) -> None:
     if total <= 0:
         return
     usage = used / total
-    if usage < 0.90:
+    if usage < 0.85:
         return
 
     strategy_name = adapter._experiment_strategy_name
 
-    if strategy_name in ("sglang_default", "preempt-evict"):
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf"):
         return
 
     cached = adapter._cached_preempt_priority
     if not cached:
         return
 
-    best_victim_req = None
-    best_priority = float("inf")
+    # Collect candidates sorted by priority (ascending = highest eviction priority)
+    scored_reqs = []
     for req in running_reqs:
         rid = _get_request_id(req)
         if rid is None:
             continue
         p = cached.get(rid, float("inf"))
-        if p < best_priority:
-            best_priority = p
-            best_victim_req = req
+        scored_reqs.append((p, req))
+    scored_reqs.sort(key=lambda x: x[0])
 
-    if best_victim_req is None:
+    if not scored_reqs:
         return
 
-    victim_id = _get_request_id(best_victim_req) or ""
-    freed_estimate = getattr(best_victim_req, "num_computed_tokens", 0) or 0
+    # Only proceed if the top candidate has an actual victim priority (< 10).
+    # Priorities 0–(n_victims-1) are assigned by select_victims(); 100+ are
+    # catch-all non-victim assignments.  Without this guard, BidKV would
+    # randomly evict a non-victim when select_victims() returns empty
+    # (e.g., all running requests have output_tokens ≤ 2).
+    if scored_reqs[0][0] >= 10.0:
+        return  # no qualified victim in priority cache
 
-    aborted = _abort_request(scheduler, victim_id)
-    if not aborted:
+    # Select 2 victims when KV usage is critical (>95%), otherwise 1
+    n_victims = 2 if usage > 0.95 else 1
+    n_victims = min(n_victims, len(scored_reqs), len(running_reqs) - 2)
+    if n_victims <= 0:
         return
 
-    scheduler._bidkv_last_proactive = now
-    adapter._metrics.record_eviction(victim_id, freed_estimate)
-    _diag(
-        f"proactive PREEMPT: strategy={strategy_name} "
-        f"victim={victim_id} usage={usage:.2f} freed~{freed_estimate}"
-    )
+    aborted_any = False
+    for _, victim_req in scored_reqs[:n_victims]:
+        victim_id = _get_request_id(victim_req) or ""
+        freed_estimate = getattr(victim_req, "num_computed_tokens", 0) or 0
+        if _abort_request(scheduler, victim_id):
+            aborted_any = True
+            adapter._metrics.record_compression(victim_id, freed_estimate)
+            _diag(
+                f"proactive PREEMPT: strategy={strategy_name} "
+                f"victim={victim_id} usage={usage:.2f} freed~{freed_estimate}"
+            )
+
+    if aborted_any:
+        scheduler._bidkv_last_proactive = now
 
 
 def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
@@ -471,21 +488,21 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
     FCFS/EDF strategies (sglang_default, slack-aware) are excluded.
 
     Guards:
-    - KV utilization > 80%
+    - KV utilization > 75%
     - Waiting queue non-empty
     - At least 3 running requests
     - Running victim must have generated >= 10 output tokens
     - Clear benefit: remaining(running) > 1.2 × total(waiting)
-    - 1.5-second cooldown
+    - 0.8-second cooldown
     """
     strategy_name = adapter._experiment_strategy_name
 
-    if strategy_name in ("sglang_default", "preempt-evict", "slack_aware", "slack-aware"):
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf", "slack_aware", "slack-aware"):
         return
 
     now = time.monotonic()
     last_srpt = getattr(scheduler, "_bidkv_last_srpt", 0.0)
-    if now - last_srpt < 1.5:
+    if now - last_srpt < 0.8:
         return
 
     running_reqs = _get_running_requests(scheduler)
@@ -497,7 +514,7 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
     if total <= 0:
         return
     usage = used / total
-    if usage < 0.80:
+    if usage < 0.75:
         return
 
     best_waiting_cost = float("inf")
@@ -594,7 +611,7 @@ def _build_running_candidates(
             (
                 RequestState(
                     request_id=rid,
-                    current_tokens=len(token_ids) if token_ids else 0,
+                    current_tokens=num_computed if num_computed > 0 else (len(token_ids) if token_ids else 0),
                     token_ids=tuple(token_ids) if token_ids else (),
                     priority=priority,
                     arrival_time_ms=arrival_ms,

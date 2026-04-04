@@ -23,11 +23,46 @@ logger = logging.getLogger(__name__)
 _PATCHED = False
 
 
+def _patch_torch_register_fake_safe() -> None:
+    """将 torch.library.register_fake 替换为安全版本。
+
+    当 sgl_kernel C 扩展未加载（torch 版本不兼容）时，
+    register_fake 调用会因 op 不存在而抛出 RuntimeError。
+    此补丁使其在 op 不存在时静默跳过，允许 SGLang 正常导入 BF16 推理路径。
+    """
+    import torch
+
+    _original = torch.library.register_fake
+
+    def _safe_register_fake(op_name, func=None, **kwargs):  # type: ignore[override]
+        def _check_and_register(fn):
+            if "::" in str(op_name):
+                ns, bare = str(op_name).split("::", 1)
+                ops_ns = getattr(torch.ops, ns, None)
+                if ops_ns is None or not hasattr(ops_ns, bare):
+                    # op does not exist — skip registration silently
+                    return fn
+            return _original(op_name, fn, **kwargs)
+
+        if func is None:
+            # used as decorator: @torch.library.register_fake("ns::op")
+            return _check_and_register
+        else:
+            # used directly: torch.library.register_fake("ns::op", fn)
+            return _check_and_register(func)
+
+    torch.library.register_fake = _safe_register_fake  # type: ignore[method-assign]
+    logger.debug("torch.library.register_fake patched to safe version (sgl_kernel compat)")
+
+
 def _patch_sglang_scheduler(strategy_name: str) -> None:
     """Monkey-patch SGLang Scheduler.__init__ 以注入 BidKV hooks。"""
     global _PATCHED
     if _PATCHED:
         return
+
+    # Ensure torch.library.register_fake doesn't crash on missing sgl_kernel ops
+    _patch_torch_register_fake_safe()
 
     try:
         from sglang.srt.managers.scheduler import Scheduler
@@ -102,8 +137,41 @@ def _install_bidkv_hooks(scheduler: object, strategy_name: str) -> None:
     logger.info("BidKV hooks installed on SGLang Scheduler (strategy=%s)", strategy_name)
 
 
+def _bidkv_run_scheduler_process(*args: object, **kwargs: object) -> None:
+    """Scheduler subprocess entry point with BidKV hooks.
+
+    This module-level function replaces SGLang's default run_scheduler_process so
+    that BidKV hooks are installed inside the SPAWNED subprocess (where parent's
+    in-memory monkey-patches are not inherited).
+
+    Flow:
+      1. Read BIDKV_STRATEGY from environment (inherited from parent).
+      2. Patch Scheduler.__init__ on the class inside this subprocess.
+      3. Call the original run_scheduler_process — which creates Scheduler(),
+         triggering our patched __init__ and installing the hooks.
+    """
+    strategy_name = os.environ.get("BIDKV_STRATEGY", "sglang_default")
+
+    # Patch Scheduler.__init__ in this subprocess before the Scheduler is created.
+    from sglang.srt.managers.scheduler import Scheduler
+
+    _orig_scheduler_init = Scheduler.__init__
+
+    def _patched_scheduler_init(self: object, *a: object, **kw: object) -> None:  # noqa: ANN001
+        _orig_scheduler_init(self, *a, **kw)
+        _install_bidkv_hooks(self, strategy_name)
+
+    Scheduler.__init__ = _patched_scheduler_init  # type: ignore[method-assign]
+
+    from sglang.srt.managers.scheduler import run_scheduler_process
+
+    run_scheduler_process(*args, **kwargs)  # type: ignore[arg-type]
+
+
 def main() -> None:
     """Entry point — 注入 BidKV 后启动 SGLang server。"""
+    import sys
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -112,15 +180,34 @@ def main() -> None:
     strategy = os.environ.get("BIDKV_STRATEGY", "sglang_default")
     logger.info("SGLang BidKV entry point: strategy=%s", strategy)
 
-    # ALL strategies install hooks for fair comparison.
-    # sglang_default hooks do FCFS (no reorder) — identical to vanilla SGLang
-    # scheduling, but with the same infrastructure overhead for fairness.
-    _patch_sglang_scheduler(strategy)
+    # Parse ServerArgs from CLI (same as sglang.launch_server does).
+    from sglang.srt.server_args import prepare_server_args
+    from sglang.srt.utils import kill_process_tree
 
-    # 启动 SGLang server
-    import runpy
+    server_args = prepare_server_args(sys.argv[1:])
 
-    runpy.run_module("sglang.launch_server", run_name="__main__")
+    try:
+        # Pass our subprocess wrapper so BidKV hooks run inside the spawned
+        # Scheduler process.  This replaces the old runpy.run_module approach
+        # which could not inject hooks across spawn boundaries.
+        if server_args.grpc_mode:
+            from sglang.srt.entrypoints.grpc_server import serve_grpc
+            import asyncio
+
+            asyncio.run(serve_grpc(server_args))
+        elif getattr(server_args, "encoder_only", False):
+            from sglang.srt.disaggregation.encode_server import launch_server as _ls
+
+            _ls(server_args)
+        else:
+            from sglang.srt.entrypoints.http_server import launch_server
+
+            launch_server(
+                server_args,
+                run_scheduler_process_func=_bidkv_run_scheduler_process,
+            )
+    finally:
+        kill_process_tree(os.getpid(), include_parent=False)
 
 
 if __name__ == "__main__":
