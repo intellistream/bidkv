@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **SGLang v5 native ablation: vanilla_sglang → random_evict → bidkv** (2026-04-04):
+  - 新增 `RandomEvictStrategy`（`src/bidkv/baselines/random_evict.py`），实现随机 victim 排序
+  - 新增 `STRATEGY_VANILLA_SGLANG`、`STRATEGY_RANDOM_EVICT`、`SGLANG_NATIVE_ABL_STRATEGIES` 到 `config.py`
+  - 更新 `EXTENDED_STRATEGIES` + `STRATEGY_BASELINE_MAP` 支持两个新策略
+  - `scheduler_hook.py` 5 处策略分支更新：vanilla_sglang = 纯 pass-through；random_evict = FCFS waiting + 随机 running reorder + 随机 proactive preempt；no SRPT
+  - `registry.py` 注册 `RandomEvictStrategy`（registry 策略总数 7→8）
+  - 实验结果（mixed rate=5.7, 3×3=9 runs）：
+    | Strategy | TTFT-p50 | TTFT-p95 | Tput | SLO(300ms) |
+    |---|---|---|---|---|
+    | vanilla_sglang | 188ms | 6246ms | 3.04 r/s | 55.2% |
+    | random_evict | 114ms | 879ms | 5.57 r/s | 85.7% |
+    | bidkv | 114ms | **598ms** | 5.53 r/s | **86.9%** |
+  - 消融链验证：vanilla→random 证明打破 SGLang 默认顺序有巨大收益（p95 6246→879ms）；random→bidkv 证明质量感知排序有额外收益（p95 879→598ms，+3.3pp SLO）
+
 ### Changed
 
 - **v9 公式实验失败，恢复 v8 公式 + H2O→Positional 全量重命名** (2026-04-07):
