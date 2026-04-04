@@ -3,7 +3,7 @@
 SGLang 的 model execution 在每个 decode step 后可以提供 attention pattern
 （如果通过自定义 attention backend 或 sampling callback 收集）。
 
-本模块提供钩子函数，将 attention pattern 转发给 SGLangAdapter 的 H2OScoring。
+本模块提供钩子函数，将 attention pattern 转发给 SGLangAdapter 的 PositionalScoring。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ def install_h2o_hook(scheduler: Any, adapter: Any) -> None:
     """安装 H2O decode step 回调到 SGLang 的 model execution path。
 
     SGLang 在每个 decode step 后通过 model runner 返回 logits。
-    本钩子在 logits 返回后收集 attention pattern 并更新 H2OScoring。
+    本钩子在 logits 返回后收集 attention pattern 并更新 PositionalScoring。
 
     注意：SGLang 的 FlashAttention 默认不暴露 attention weights。
     H2O 使用 token attend 频率（从 model output logprobs 推断）作为代理信号。
@@ -60,7 +60,7 @@ def install_h2o_hook(scheduler: Any, adapter: Any) -> None:
 
 
 def _process_decode_output(scheduler: Any, adapter: Any, output: Any) -> None:
-    """从 decode step 输出中提取注意力信号并更新 H2OScoring。
+    """从 decode step 输出中提取注意力信号并更新 PositionalScoring。
 
     SGLang 不直接暴露 attention weights。我们从 logprobs 和 token 选择
     中推断 attention pattern（top-k logprob 分布作为注意力代理）。
@@ -112,5 +112,5 @@ def _extract_attention_proxy(req: Any, output: Any) -> list[float] | None:
                 return attentions
 
     # FlashAttention 下无 attention weights 可用 — 返回 None
-    # H2OScoring 会退化到位置启发式评分
+    # PositionalScoring 会退化到位置启发式评分
     return None

@@ -16,6 +16,7 @@ from bidkv.baselines import (
     BidKVStrategy,
     CompressionAction,
     H2OStyleStrategy,
+    LargestFirstStrategy,
     PreemptEvictSJFStrategy,
     PreemptEvictStrategy,
     RequestState,
@@ -43,7 +44,7 @@ from bidkv.protocol import (
 )
 from bidkv.scoring import (
     AttentionWeightScoring,
-    H2OScoring,
+    PositionalScoring,
     RandomScoring,
     ScoringStrategy,
     UniformScoring,
@@ -76,7 +77,7 @@ __all__ = [
     "SolverConfig",
     # Scoring
     "AttentionWeightScoring",
-    "H2OScoring",
+    "PositionalScoring",
     "RandomScoring",
     "ScoringStrategy",
     "UniformScoring",
@@ -87,7 +88,8 @@ __all__ = [
     "BaselineStrategy",
     "BidKVStrategy",
     "CompressionAction",
-    "H2OStyleStrategy",
+    "H2OStyleStrategy",  # backward compat alias for LargestFirstStrategy
+    "LargestFirstStrategy",
     "PreemptEvictStrategy",
     "PreemptEvictSJFStrategy",
     "RequestState",

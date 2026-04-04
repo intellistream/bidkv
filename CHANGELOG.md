@@ -94,6 +94,75 @@ All notable changes to this project will be documented in this file.
   - Results in `results/sglang_validation_v1/`.
 
 ### Changed
+- **Comprehensive data analysis guide in copilot-instructions** (2026-04-03):
+  - Replaced brief JSON format snippet with full 8-section analysis reference
+  - Added file naming convention, all 13 top-level keys, all 10 request fields
+  - Documented adapter_metrics field name inconsistency (`total_compressions` vs `total_evictions`)
+  - Added summary field reference (11 keys, no p95/SLO)
+  - Added complete `load_run()` / `load_all_runs()` / `cross_rate_average()` code templates
+  - Added 7 known data traps table with correct workarounds
+  - Added audit-verified eviction reference values per strategy × workload
+  - Synced to both `.github/copilot-instructions.md` and `.github/agents/bidkv-agent.md`
+
+- **Rename h2o-style → largest-first** (2026-04-06):
+  - `baselines/h2o_style.py` → `baselines/largest_first.py`
+  - `H2OStyleStrategy` → `LargestFirstStrategy` (backward compat alias kept)
+  - Strategy name: `"h2o-style"` → `"largest-first"`
+  - Config constant: `STRATEGY_H2O_STYLE` → `STRATEGY_LARGEST_FIRST`
+  - Added `STRATEGY_LEGACY_NAMES` mapping for frozen result data compatibility
+  - `scoring/h2o.py`, `h2o_hook.py` files unchanged (scoring module, not strategy)
+  - All analysis display names updated to "Largest-First"
+
+### Removed
+
+- **Remove dead `BidKVStrategy._completion_factor()`** (2026-04-06):
+  - Method was never called by `select_victims()` (v8 formula uses inline calculation)
+  - `GlobalNoBidStrategy._completion_factor()` retained (still in use)
+
+### Fixed
+
+- **Remove avg_prompt > 500 long-context gate from BidKV reorder** (2026-04-03):
+  - `scheduler_hook.py` `_reorder_running_for_preemption()`: removed the
+    `avg_prompt > 500 → return` guard that completely disabled quality-aware
+    reorder for long-context workloads (avg prompt ~1785 tokens).
+  - Root cause: gate was designed for mixed workload (avg ~300-500) but
+    prevented BidKV's core mechanism from operating in long-context.
+  - BidKV's U-score already handles recompute concerns via completion factor
+    and anti-starvation penalty — the blunt prompt-length gate was redundant.
+  - KV > 95% pressure gate retained (no reorder when KV isn't under pressure).
+  - Expected impact: BidKV regains quality-aware victim selection for
+    long-context, matching the mechanism that achieved SLO #1 + TTFT #1
+    in mixed workload.
+
+### Changed
+
+- **Metric system FROZEN: 4-column main table (v8-frozen)** (2026-04-02):
+  - **FROZEN** — 后续实验（long_context、SGLang）使用相同 4 列体系
+  - Main table: Throughput + SLO attainment(300ms) + TTFT p95 + TPOT p95
+  - Goodput(500ms) moved to supplementary (low universality, overlaps SLO)
+  - Normalized Latency removed (covered by TTFT+TPOT decomposition)
+  - p95 values recomputed from raw request data (previously used summary p99)
+  - BidKV cross-rate: Throughput #4, SLO #1, TTFT #1, TPOT #4
+  - Full analysis: `results/vllm_v8_analysis/v8_analysis_report.md`
+  - Updated copilot-instructions.md with corrected metric system and data
+
+- **Freeze v8 experiment environment** (2026-04-02):
+  - Server params frozen: `--gpu-memory-utilization 0.5 --num-gpu-blocks-override 600
+    --max-num-seqs 32 --block-size 16 --max-model-len 8192 --enforce-eager`
+  - Workload rates frozen: mixed (2.0, 3.8, 5.7), long_context (0.35, 0.5, 0.7)
+  - v8 mixed 63-run data frozen at `results/vllm_v8_full_validation/`
+  - Updated copilot instructions with frozen params, full ranking tables, v8b SRPT results
+  - Cleaned 230 stale intermediate result files from git tracking (pre-v8 data)
+  - Added stale result dirs to .gitignore
+
+- **Rename compression metrics to eviction metrics** (#terminology):
+  - `total_compressions` → `total_evictions`（字段、dict key、JSON 输出）
+  - `record_compression()` → `record_eviction()`（方法名）
+  - `compression_coverage` → `eviction_coverage`（ExperimentMetrics 字段）
+  - `_plot_compression_coverage()` → `_plot_eviction_coverage()`
+  - 所有 analysis/report/pilot_calibration 代码同步更新
+  - 旧 JSON 数据向后兼容：fallback 读取 `total_compressions` / `compression_coverage`
+  - 动机：BidKV 在 Mode A 中是请求调度原语，不做压缩；"compression" 术语误导
 
 - **scheduler_hook: finalize v8 scheduling with improved comments**:
   - Removed v11c proactive cheapest-victim block (reverted to generic cached-priority

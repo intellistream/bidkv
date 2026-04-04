@@ -1,4 +1,5 @@
 """Show full data tables with SLO attainment for all strategies."""
+
 from __future__ import annotations
 
 import glob
@@ -49,15 +50,20 @@ def avg_runs(paths: list[str], slo_thresh: float) -> dict | None:
     if not runs:
         return None
     keys = [
-        "success_pct", "tput", "ttft50", "ttft99",
-        "tpot50", "tpot99", "e2e50", "e2e99", "normlat",
+        "success_pct",
+        "tput",
+        "ttft50",
+        "ttft99",
+        "tpot50",
+        "tpot99",
+        "e2e50",
+        "e2e99",
+        "normlat",
     ]
     avg = {}
     for k in keys:
         avg[k] = statistics.mean(r[k] for r in runs)
-    avg["success"] = (
-        f"{statistics.mean(r['success'] for r in runs):.0f}/{runs[0]['total']}"
-    )
+    avg["success"] = f"{statistics.mean(r['success'] for r in runs):.0f}/{runs[0]['total']}"
     avg["n"] = len(runs)
     # SLO: average across runs
     slo_vals = [slo_pct(r["ttft_list"], slo_thresh) for r in runs]
@@ -76,8 +82,9 @@ def single_run(path: str, slo_thresh: float) -> dict | None:
     return m
 
 
-def print_table(title: str, workload: str, rates: list, slo_thresh: float,
-                strats: list[str], rate_fmt: str) -> None:
+def print_table(
+    title: str, workload: str, rates: list, slo_thresh: float, strats: list[str], rate_fmt: str
+) -> None:
     header = (
         f"{'Strategy':<22} {'Rate':>5} {'Succ%':>6} {'SLO%':>6} "
         f"{'Tput':>6} {'TTFT p50':>9} {'TTFT p99':>9} "
@@ -96,9 +103,7 @@ def print_table(title: str, workload: str, rates: list, slo_thresh: float,
     for rate in rates:
         rate_s = f"{rate:{rate_fmt}}"
         for strat in strats:
-            files = glob.glob(
-                f"results/vllm_full_v1/{strat}__{workload}__rate{rate}__r*.json"
-            )
+            files = glob.glob(f"results/vllm_full_v1/{strat}__{workload}__rate{rate}__r*.json")
             if not files:
                 continue
             m = avg_runs(files, slo_thresh)
@@ -147,20 +152,33 @@ def print_table(title: str, workload: str, rates: list, slo_thresh: float,
 
 def main() -> None:
     strats = [
-        "preempt-evict", "preempt-evict-sjf", "static-random",
-        "h2o-style", "uniform", "slack-aware", "bidkv",
+        "preempt-evict",
+        "preempt-evict-sjf",
+        "static-random",
+        "h2o-style",
+        "uniform",
+        "slack-aware",
+        "bidkv",
     ]
 
     print_table(
-        "TABLE 1: Mixed Workload", "mixed",
-        [2.0, 3.8, 5.7], 2000.0, strats, ".1f",
+        "TABLE 1: Mixed Workload",
+        "mixed",
+        [2.0, 3.8, 5.7],
+        2000.0,
+        strats,
+        ".1f",
     )
 
     print()
 
     print_table(
-        "TABLE 2: Long-Context Workload", "long_context",
-        [0.35, 0.5, 0.7], 5000.0, strats, ".2f",
+        "TABLE 2: Long-Context Workload",
+        "long_context",
+        [0.35, 0.5, 0.7],
+        5000.0,
+        strats,
+        ".2f",
     )
 
     # ===== Summary: Best strategy per scenario =====
@@ -177,9 +195,7 @@ def main() -> None:
             best_slo = -1.0
             best_tput = -1.0
             for strat in strats:
-                files = glob.glob(
-                    f"results/vllm_full_v1/{strat}__{wl}__rate{rate}__r*.json"
-                )
+                files = glob.glob(f"results/vllm_full_v1/{strat}__{wl}__rate{rate}__r*.json")
                 if not files:
                     continue
                 m = avg_runs(files, slo_t)

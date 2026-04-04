@@ -12,7 +12,7 @@ echo "Start: $(date)"
 echo ""
 
 # Run each strategy separately so one crash doesn't block others
-for STRAT in bidkv preempt-evict-sjf h2o-style; do
+for STRAT in bidkv preempt-evict-sjf largest-first; do
   echo "--- Running strategy: $STRAT ($(date)) ---"
   conda run -n sagellm python -m bidkv.experiments.vllm.runner \
     --strategies "$STRAT" \

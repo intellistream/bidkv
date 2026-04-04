@@ -5,7 +5,7 @@
 - BaselineRegistry 注册与获取
 - 7 个 baseline 各 ≥ 3 个测试
 - Candidate-universe consistency（所有 baseline 使用同一候选池）
-- H2O-Style ≠ H2OScoring 区分验证
+- Largest-First (was H2O-Style) ≠ PositionalScoring 区分验证
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from bidkv.baselines import (
     BaselineStrategy,
     BidKVStrategy,
     CompressionAction,
-    H2OStyleStrategy,
+    LargestFirstStrategy,
     PreemptEvictSJFStrategy,
     PreemptEvictStrategy,
     RequestState,
@@ -26,7 +26,7 @@ from bidkv.baselines import (
     UniformStrategy,
 )
 from bidkv.protocol.bid import CompressionBid
-from bidkv.scoring import H2OScoring
+from bidkv.scoring import PositionalScoring
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,8 +87,8 @@ def _make_candidates_varied() -> list[RequestState]:
 
 
 def _make_bids_for_request(request_id: str, token_ids: tuple[int, ...]) -> list[CompressionBid]:
-    """用 H2OScoring 为请求生成 bids。"""
-    scorer = H2OScoring()
+    """用 PositionalScoring 为请求生成 bids。"""
+    scorer = PositionalScoring()
     return scorer.generate_bids(
         request_id,
         token_ids,
@@ -189,7 +189,7 @@ class TestBaselineRegistry:
             "preempt-evict",
             "preempt-evict-sjf",
             "static-random",
-            "h2o-style",
+            "largest-first",
             "uniform",
             "slack-aware",
             "bidkv",
@@ -282,28 +282,28 @@ class TestStaticRandom:
 
 
 # ===========================================================================
-# H2O-Style tests
+# Largest-First tests (was H2O-Style)
 # ===========================================================================
 
 
-class TestH2OStyle:
-    """H2O-Style baseline 测试。"""
+class TestLargestFirst:
+    """Largest-First baseline 测试。"""
 
     def test_name(self) -> None:
-        assert H2OStyleStrategy().name == "h2o-style"
+        assert LargestFirstStrategy().name == "largest-first"
 
-    def test_h2o_style_is_not_h2o_scoring(self) -> None:
-        """H2O-Style ≠ H2OScoring：确认 H2O-Style 是策略，使用 H2OScoring 实例。"""
-        scorer = H2OScoring()
-        strategy = H2OStyleStrategy(scoring=scorer)
-        # H2O-Style 是 BaselineStrategy 实例
+    def test_largest_first_is_not_positional_scoring(self) -> None:
+        """Largest-First ≠ PositionalScoring：确认是策略而非评分器。"""
+        scorer = PositionalScoring()
+        strategy = LargestFirstStrategy(scoring=scorer)
+        # Largest-First 是 BaselineStrategy 实例
         assert isinstance(strategy, BaselineStrategy)
-        # H2O-Style 持有 H2OScoring 实例
+        # Largest-First 持有 PositionalScoring 实例
         assert strategy.scoring is scorer
 
     def test_compresses_with_scoring(self) -> None:
         candidates = _make_candidates_varied()
-        strategy = H2OStyleStrategy()
+        strategy = LargestFirstStrategy()
         actions = strategy.select_victims(candidates, needed_tokens=100)
         assert len(actions) >= 1
         for action in actions:
@@ -311,22 +311,22 @@ class TestH2OStyle:
 
     def test_respects_needed_tokens(self) -> None:
         candidates = _make_candidates_varied()
-        strategy = H2OStyleStrategy()
+        strategy = LargestFirstStrategy()
         actions = strategy.select_victims(candidates, needed_tokens=100)
         freed = sum(a.target_tokens for a in actions)
         assert freed >= 100
 
     def test_empty_candidates(self) -> None:
-        strategy = H2OStyleStrategy()
+        strategy = LargestFirstStrategy()
         assert strategy.select_victims([], needed_tokens=100) == []
 
     def test_with_scoring_states(self) -> None:
-        """可以传入每个请求独立的 H2OScoring 实例。"""
+        """可以传入每个请求独立的 PositionalScoring 实例。"""
         candidates = [RequestState("req-1", current_tokens=100, token_ids=tuple(range(100)))]
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         # 用 decode 数据更新 scorer
         scorer.update_from_decode_step([float(i) for i in range(100)])
-        strategy = H2OStyleStrategy()
+        strategy = LargestFirstStrategy()
         actions = strategy.select_victims(
             candidates, needed_tokens=30, scoring_states={"req-1": scorer}
         )
@@ -602,7 +602,7 @@ class TestCandidateUniverseConsistency:
             PreemptEvictStrategy(),
             PreemptEvictSJFStrategy(),
             StaticRandomStrategy(seed=42),
-            H2OStyleStrategy(),
+            LargestFirstStrategy(),
             UniformStrategy(),
             SlackAwareStrategy(),
             BidKVStrategy(delta_budget=0.5),
@@ -630,7 +630,7 @@ class TestCandidateUniverseConsistency:
             PreemptEvictStrategy(),
             PreemptEvictSJFStrategy(),
             StaticRandomStrategy(seed=0),
-            H2OStyleStrategy(),
+            LargestFirstStrategy(),
             UniformStrategy(),
             SlackAwareStrategy(),
             BidKVStrategy(delta_budget=0.5),

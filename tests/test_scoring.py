@@ -2,7 +2,7 @@
 
 覆盖：
 - ScoringStrategy Protocol 合规性
-- H2OScoring 策略
+- PositionalScoring 策略
 - AttentionWeightScoring 策略
 - UniformScoring 策略
 - RandomScoring 策略
@@ -19,7 +19,7 @@ import pytest
 from bidkv.protocol.bid import CompressionBid
 from bidkv.scoring.attention import AttentionWeightScoring
 from bidkv.scoring.base import ScoringStrategy
-from bidkv.scoring.h2o import H2OScoring
+from bidkv.scoring.positional import PositionalScoring
 from bidkv.scoring.random_score import RandomScoring
 from bidkv.scoring.uniform import UniformScoring
 
@@ -101,7 +101,7 @@ class TestScoringStrategyProtocol:
     """测试所有策略是否满足 ScoringStrategy Protocol。"""
 
     def test_h2o_is_scoring_strategy(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         assert isinstance(scorer, ScoringStrategy)
 
     def test_attention_is_scoring_strategy(self) -> None:
@@ -118,43 +118,43 @@ class TestScoringStrategyProtocol:
 
 
 # ===========================================================================
-# H2OScoring 测试
+# PositionalScoring 测试
 # ===========================================================================
 
 
-class TestH2OScoring:
+class TestPositionalScoring:
     """H2O Heavy Hitter Oracle 评分策略测试。"""
 
     def test_init_defaults(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         assert scorer.heavy_ratio == 0.2
         assert scorer.recent_ratio == 0.2
         assert scorer.decode_steps == 0
 
     def test_init_custom_params(self) -> None:
-        scorer = H2OScoring(heavy_ratio=0.3, recent_ratio=0.1)
+        scorer = PositionalScoring(heavy_ratio=0.3, recent_ratio=0.1)
         assert scorer.heavy_ratio == 0.3
         assert scorer.recent_ratio == 0.1
 
     def test_invalid_heavy_ratio(self) -> None:
         with pytest.raises(ValueError, match="heavy_ratio"):
-            H2OScoring(heavy_ratio=1.5)
+            PositionalScoring(heavy_ratio=1.5)
 
     def test_invalid_recent_ratio(self) -> None:
         with pytest.raises(ValueError, match="recent_ratio"):
-            H2OScoring(recent_ratio=-0.1)
+            PositionalScoring(recent_ratio=-0.1)
 
     def test_heavy_plus_recent_exceeds_one(self) -> None:
         with pytest.raises(ValueError, match="heavy_ratio \\+ recent_ratio"):
-            H2OScoring(heavy_ratio=0.6, recent_ratio=0.5)
+            PositionalScoring(heavy_ratio=0.6, recent_ratio=0.5)
 
     def test_score_empty(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         assert scorer.score([]) == []
 
     def test_score_positional_heuristic(self) -> None:
         """无 decode 数据时使用位置启发式。"""
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         scores = scorer.score(DEFAULT_TOKEN_IDS)
         _validate_scores(scores, len(DEFAULT_TOKEN_IDS))
         # 第一个 token（attention sink）应比中间 token 更重要
@@ -162,7 +162,7 @@ class TestH2OScoring:
 
     def test_score_with_cumulative_attention(self) -> None:
         """有 decode 数据时使用累积注意力评分。"""
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         n = 20
         token_ids = list(range(n))
 
@@ -182,7 +182,7 @@ class TestH2OScoring:
 
     def test_score_via_context(self) -> None:
         """通过 context 传递 attention_pattern。"""
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         n = 10
         pattern = [0.1] * n
         pattern[3] = 0.9
@@ -191,25 +191,25 @@ class TestH2OScoring:
         assert scorer.decode_steps == 1
 
     def test_generate_bids(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         bids = scorer.generate_bids("req-1", DEFAULT_TOKEN_IDS, DEFAULT_COMPRESSION_LEVELS)
         assert len(bids) == len(DEFAULT_COMPRESSION_LEVELS)
         _validate_bids(bids, "req-1")
         # bid_id 格式检查
         for i, bid in enumerate(bids):
             assert bid.bid_id == f"req-1:bid:{i}"
-            assert bid.algorithm_id == "h2o"
+            assert bid.algorithm_id == "positional"
             assert "scoring_method" in bid.metadata
-            assert bid.metadata["scoring_method"] == "h2o_cumulative_attention"
+            assert bid.metadata["scoring_method"] == "positional"
 
     def test_generate_bids_empty(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         bids = scorer.generate_bids("req-1", [], DEFAULT_COMPRESSION_LEVELS)
         assert bids == []
 
     def test_generate_bids_with_decode_data(self) -> None:
         """有 decode 数据时，confidence 应更高。"""
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         n = 50
         token_ids = list(range(n))
         # 添加 decode 数据
@@ -221,7 +221,7 @@ class TestH2OScoring:
         assert bids[0].confidence > 0.3  # 有 decode 数据时 confidence 应 > 0.3
 
     def test_reset(self) -> None:
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         scorer.update_from_decode_step([0.1, 0.2, 0.3])
         assert scorer.decode_steps == 1
         scorer.reset()
@@ -229,7 +229,7 @@ class TestH2OScoring:
 
     def test_tokens_freed_monotonically_increases(self) -> None:
         """更高压缩级别应释放更多 token。"""
-        scorer = H2OScoring()
+        scorer = PositionalScoring()
         bids = scorer.generate_bids("req-1", DEFAULT_TOKEN_IDS, DEFAULT_COMPRESSION_LEVELS)
         freed_values = [b.tokens_freed for b in bids]
         for i in range(len(freed_values) - 1):
@@ -474,8 +474,8 @@ class TestScoringCorrelation:
         attn_weights = [[head1, head2]]
         attn_scores = attn_scorer.score(token_ids, attention_weights=attn_weights)
 
-        # H2OScoring：通过多步累积同一分布
-        h2o_scorer = H2OScoring(heavy_ratio=0.2, recent_ratio=0.1)
+        # PositionalScoring：通过多步累积同一分布
+        h2o_scorer = PositionalScoring(heavy_ratio=0.2, recent_ratio=0.1)
         for _step in range(10):
             # 每步加一些噪声到真实分布上
             noisy_pattern = [a * rng.uniform(0.7, 1.3) for a in base_attention]
@@ -511,7 +511,7 @@ class TestScoringCorrelation:
         attn_scores = attn_scorer.score(token_ids, attention_weights=attn_weights)
 
         # H2O
-        h2o_scorer = H2OScoring()
+        h2o_scorer = PositionalScoring()
         for _ in range(5):
             noisy = [a * rng.uniform(0.8, 1.2) for a in base_attention]
             h2o_scorer.update_from_decode_step(noisy)
@@ -553,7 +553,7 @@ class TestGenerateBidsCommon:
     @pytest.mark.parametrize(
         "scorer_cls,kwargs",
         [
-            (H2OScoring, {}),
+            (PositionalScoring, {}),
             (AttentionWeightScoring, {}),
             (UniformScoring, {}),
             (RandomScoring, {"seed": 42}),
@@ -579,7 +579,7 @@ class TestGenerateBidsCommon:
     @pytest.mark.parametrize(
         "scorer_cls,kwargs",
         [
-            (H2OScoring, {}),
+            (PositionalScoring, {}),
             (AttentionWeightScoring, {}),
             (UniformScoring, {}),
             (RandomScoring, {"seed": 42}),
@@ -595,7 +595,7 @@ class TestGenerateBidsCommon:
     @pytest.mark.parametrize(
         "scorer_cls,kwargs",
         [
-            (H2OScoring, {}),
+            (PositionalScoring, {}),
             (AttentionWeightScoring, {}),
             (UniformScoring, {}),
             (RandomScoring, {"seed": 42}),
@@ -609,7 +609,7 @@ class TestGenerateBidsCommon:
     @pytest.mark.parametrize(
         "scorer_cls,kwargs",
         [
-            (H2OScoring, {}),
+            (PositionalScoring, {}),
             (AttentionWeightScoring, {}),
             (UniformScoring, {}),
             (RandomScoring, {"seed": 42}),
@@ -743,7 +743,7 @@ class TestBidKVStrategyScorerAgnostic:
         from bidkv.baselines.bidkv_strategy import BidKVStrategy
 
         strategy = BidKVStrategy()
-        assert isinstance(strategy.scoring, H2OScoring)
+        assert isinstance(strategy.scoring, PositionalScoring)
 
     def test_inject_uniform_scorer(self) -> None:
         from bidkv.baselines.bidkv_strategy import BidKVStrategy

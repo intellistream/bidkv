@@ -58,7 +58,7 @@ def _install_bidkv(scheduler: object, strategy_name: str) -> None:
     from bidkv.baselines import BaselineRegistry
     from bidkv.config import BidKVConfig
     from bidkv.pressure import PressureConfig
-    from bidkv.scoring.h2o import H2OScoring
+    from bidkv.scoring.positional import PositionalScoring
     from bidkv.solver import SolverConfig
 
     config = BidKVConfig(
@@ -67,7 +67,7 @@ def _install_bidkv(scheduler: object, strategy_name: str) -> None:
         delta_budget=0.30,
         truncation_ratio=float(os.environ.get("BIDKV_TRUNCATION_RATIO", "0.5")),
     )
-    scoring = H2OScoring()
+    scoring = PositionalScoring()
 
     pressure_config = PressureConfig(
         enabled=True,

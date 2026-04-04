@@ -1,4 +1,5 @@
 """Compare v5 BidKV results with baselines."""
+
 from __future__ import annotations
 
 import glob
@@ -44,9 +45,7 @@ def extract_metrics(path: str) -> dict:
 
 def main():
     # v5
-    m = extract_metrics(
-        "results/vllm_validation_v5/bidkv__long_context__rate0.7__r0.json"
-    )
+    m = extract_metrics("results/vllm_validation_v5/bidkv__long_context__rate0.7__r0.json")
     print("=== v5 BidKV (long_context rate=0.7) ===")
     print(f"  success={m['success']} ({m['success_pct']:.1f}%)")
     print(f"  throughput={m['tput']:.3f}")
@@ -58,9 +57,7 @@ def main():
     # pe-sjf
     print("\n=== pe-sjf (long_context rate=0.7, 3 runs) ===")
     for fn in sorted(
-        glob.glob(
-            "results/vllm_full_v1/preempt-evict-sjf__long_context__rate0.7__r*.json"
-        )
+        glob.glob("results/vllm_full_v1/preempt-evict-sjf__long_context__rate0.7__r*.json")
     ):
         m2 = extract_metrics(fn)
         name = fn.split("/")[-1].replace(".json", "")
@@ -73,9 +70,7 @@ def main():
     # old bidkv
     print("\n=== OLD BidKV (long_context rate=0.7, 3 runs) ===")
     for fn in sorted(
-        glob.glob(
-            "results/vllm_full_v1/backup_old_bidkv/bidkv__long_context__rate0.7__r*.json"
-        )
+        glob.glob("results/vllm_full_v1/backup_old_bidkv/bidkv__long_context__rate0.7__r*.json")
     ):
         m2 = extract_metrics(fn)
         name = fn.split("/")[-1].replace(".json", "")
@@ -87,9 +82,7 @@ def main():
 
     # v4
     print("\n=== v4 BidKV (long_context rate=0.7) ===")
-    m2 = extract_metrics(
-        "results/vllm_validation_v4/bidkv__long_context__rate0.7__r0.json"
-    )
+    m2 = extract_metrics("results/vllm_validation_v4/bidkv__long_context__rate0.7__r0.json")
     print(
         f"  succ={m2['success']} tput={m2['tput']:.3f} "
         f"TTFT {m2['ttft_p50']:.0f}/{m2['ttft_p99']:.0f} "
@@ -99,9 +92,7 @@ def main():
     # All strategies at rate=0.7
     print("\n=== ALL strategies (long_context rate=0.7, avg) ===")
     strats: dict[str, list] = {}
-    for fn in sorted(
-        glob.glob("results/vllm_full_v1/*__long_context__rate0.7__r*.json")
-    ):
+    for fn in sorted(glob.glob("results/vllm_full_v1/*__long_context__rate0.7__r*.json")):
         name_parts = fn.split("/")[-1].replace(".json", "").rsplit("__r", 1)
         strat = name_parts[0].replace("__long_context__rate0.7", "")
         m2 = extract_metrics(fn)

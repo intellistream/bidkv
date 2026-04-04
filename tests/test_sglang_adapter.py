@@ -22,7 +22,7 @@ from bidkv.adapters.base import FrameworkAdapter
 from bidkv.adapters.sglang.adapter import SGLangAdapter
 from bidkv.config import BidKVConfig
 from bidkv.pressure import PressureConfig
-from bidkv.scoring.h2o import H2OScoring
+from bidkv.scoring.positional import PositionalScoring
 from bidkv.solver import SolverConfig
 
 # ---------------------------------------------------------------------------
@@ -43,26 +43,32 @@ def inactive_config() -> BidKVConfig:
 
 
 @pytest.fixture()
-def h2o_scoring() -> H2OScoring:
+def positional_scoring() -> PositionalScoring:
     """H2O 评分策略。"""
-    return H2OScoring(heavy_ratio=0.2, recent_ratio=0.2)
+    return PositionalScoring(heavy_ratio=0.2, recent_ratio=0.2)
 
 
 @pytest.fixture()
-def active_adapter(active_config: BidKVConfig, h2o_scoring: H2OScoring) -> SGLangAdapter:
+def active_adapter(
+    active_config: BidKVConfig,
+    positional_scoring: PositionalScoring,
+) -> SGLangAdapter:
     """激活状态的 SGLangAdapter（无 scheduler）。"""
     return SGLangAdapter(
         config=active_config,
-        scoring=h2o_scoring,
+        scoring=positional_scoring,
         pressure_config=PressureConfig(enabled=True, threshold_pct=0.85),
         solver_config=SolverConfig(enabled=True, delta_budget=0.3),
     )
 
 
 @pytest.fixture()
-def inactive_adapter(inactive_config: BidKVConfig, h2o_scoring: H2OScoring) -> SGLangAdapter:
+def inactive_adapter(
+    inactive_config: BidKVConfig,
+    positional_scoring: PositionalScoring,
+) -> SGLangAdapter:
     """未激活状态的 SGLangAdapter。"""
-    return SGLangAdapter(config=inactive_config, scoring=h2o_scoring)
+    return SGLangAdapter(config=inactive_config, scoring=positional_scoring)
 
 
 # ===========================================================================
@@ -296,7 +302,7 @@ class TestMetrics:
         """metrics.as_dict() 返回标准字段。"""
         m = active_adapter.metrics.as_dict()
         expected_keys = {
-            "total_compressions",
+            "total_evictions",
             "total_tokens_freed",
             "total_pressure_events",
             "total_requests_completed",
@@ -310,12 +316,12 @@ class TestMetrics:
         """指标应正确累积。"""
         active_adapter.metrics.record_pressure_event()
         active_adapter.metrics.record_pressure_event()
-        active_adapter.metrics.record_compression("req-1", 50)
+        active_adapter.metrics.record_eviction("req-1", 50)
         active_adapter.metrics.record_decode_step("req-1")
 
         m = active_adapter.metrics.as_dict()
         assert m["total_pressure_events"] == 2
-        assert m["total_compressions"] == 1
+        assert m["total_evictions"] == 1
         assert m["total_tokens_freed"] == 50
         assert m["total_decode_steps"] == 1
 
@@ -329,7 +335,7 @@ class TestSchedulerHook:
     """Scheduler hook 安装测试。"""
 
     def test_install_hooks_into_scheduler_object(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """验证 scheduler hook 可以安装到具有 get_next_batch_to_run 的对象上。"""
         from bidkv.adapters.sglang.scheduler_hook import install_scheduler_hook
@@ -344,7 +350,7 @@ class TestSchedulerHook:
         scheduler = FakeScheduler()
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             scheduler=scheduler,
             pressure_config=PressureConfig(enabled=True),
             solver_config=SolverConfig(enabled=True),
@@ -358,7 +364,7 @@ class TestSchedulerHook:
         assert "original" in call_log
 
     def test_install_hook_raises_without_method(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """scheduler 没有 get_next_batch_to_run 时应 raise。"""
         from bidkv.adapters.sglang.scheduler_hook import install_scheduler_hook
@@ -368,13 +374,13 @@ class TestSchedulerHook:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
         )
         with pytest.raises(RuntimeError, match="get_next_batch_to_run"):
             install_scheduler_hook(BadScheduler(), adapter)
 
     def test_uninstall_restores_original_method(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """uninstall 后 scheduler.get_next_batch_to_run 应恢复为原始方法。"""
         from bidkv.adapters.sglang.scheduler_hook import (
@@ -390,7 +396,7 @@ class TestSchedulerHook:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             scheduler=scheduler,
             pressure_config=PressureConfig(enabled=True),
             solver_config=SolverConfig(enabled=True),
@@ -422,7 +428,7 @@ class TestH2ODecodeCallback:
     """H2O decode step 回调。"""
 
     def test_on_decode_step_updates_scoring(self, active_adapter: SGLangAdapter) -> None:
-        """decode step 回调应更新 H2OScoring 的累积注意力。"""
+        """decode step 回调应更新 PositionalScoring 的累积注意力。"""
         assert active_adapter.scoring.decode_steps == 0
 
         attention_pattern = [0.1, 0.5, 0.3, 0.9, 0.2]
@@ -483,15 +489,15 @@ class TestBaselineRouting:
     """SGLangAdapter 策略路由测试。"""
 
     def test_default_strategy_is_bidkv(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """默认 experiment_strategy_name 为 bidkv。"""
-        adapter = SGLangAdapter(config=active_config, scoring=h2o_scoring)
+        adapter = SGLangAdapter(config=active_config, scoring=positional_scoring)
         assert adapter._experiment_strategy_name == "bidkv"
         assert adapter._experiment_strategy is None
 
     def test_custom_strategy_stored(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """自定义策略正确保存。"""
         from bidkv.baselines import BaselineRegistry
@@ -502,7 +508,7 @@ class TestBaselineRouting:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy=strategy,
             experiment_strategy_name="slack_aware",
         )
@@ -510,10 +516,10 @@ class TestBaselineRouting:
         assert adapter._experiment_strategy_name == "slack_aware"
 
     def test_build_request_states(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """_build_request_states 正确构建候选列表。"""
-        adapter = SGLangAdapter(config=active_config, scoring=h2o_scoring)
+        adapter = SGLangAdapter(config=active_config, scoring=positional_scoring)
         adapter.track_request("req-1", [1, 2, 3])
         adapter.track_request("req-2", [4, 5])
 
@@ -523,7 +529,7 @@ class TestBaselineRouting:
         assert ids == {"req-1", "req-2"}
 
     def test_baseline_route_skips_bidkv_pipeline(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """非 bidkv 策略走 _try_compress_baseline 路径。"""
         from bidkv.baselines import BaselineRegistry
@@ -534,7 +540,7 @@ class TestBaselineRouting:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             pressure_config=PressureConfig(enabled=True, threshold_pct=0.50),
             solver_config=SolverConfig(enabled=True, delta_budget=0.3),
             experiment_strategy=strategy,
@@ -550,7 +556,7 @@ class TestBaselineRouting:
         assert result == 0  # no scheduler → execute_compression returns 0
 
     def test_bidkv_name_uses_full_pipeline(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """strategy_name == 'bidkv' 时使用完整 bid pipeline。"""
         from bidkv.baselines import BaselineRegistry
@@ -561,7 +567,7 @@ class TestBaselineRouting:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy=strategy,
             experiment_strategy_name="bidkv",
         )
@@ -587,7 +593,7 @@ class TestModeAScheduling:
         assert active_adapter._request_arrival_ms == {}
 
     def test_scheduler_hook_mode_a_flow(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """Mode A hook: get_next_batch_to_run 完整流程。"""
         from bidkv.adapters.sglang.scheduler_hook import install_scheduler_hook
@@ -612,7 +618,7 @@ class TestModeAScheduling:
         scheduler = FakeScheduler()
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             scheduler=scheduler,
             pressure_config=PressureConfig(enabled=True),
             solver_config=SolverConfig(enabled=True),
@@ -624,7 +630,7 @@ class TestModeAScheduling:
         assert "original" in call_log
 
     def test_waiting_reorder_fcfs_for_default(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """sglang_default: waiting 队列不重排（FCFS）。"""
         from bidkv.adapters.sglang.scheduler_hook import _reorder_waiting_for_admission
@@ -642,7 +648,7 @@ class TestModeAScheduling:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy_name="sglang_default",
         )
 
@@ -652,7 +658,7 @@ class TestModeAScheduling:
         assert ids == ["a", "b", "c"]
 
     def test_waiting_reorder_sjf_for_bidkv(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """bidkv: waiting 按 prompt_tokens SJF 排序。"""
         from bidkv.adapters.sglang.scheduler_hook import _reorder_waiting_for_admission
@@ -670,7 +676,7 @@ class TestModeAScheduling:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy_name="bidkv",
         )
 
@@ -679,7 +685,7 @@ class TestModeAScheduling:
         assert ids == ["b", "c", "a"]  # SJF: 50 < 100 < 200
 
     def test_running_reorder_skipped_for_default(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """sglang_default: running 列表不重排。"""
         from bidkv.adapters.sglang.scheduler_hook import _reorder_running_for_preemption
@@ -700,7 +706,7 @@ class TestModeAScheduling:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy_name="sglang_default",
         )
 
@@ -710,7 +716,7 @@ class TestModeAScheduling:
         assert original_order == new_order
 
     def test_priority_cache_populated(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """策略 refresh 后 _cached_preempt_priority 被填充。"""
         from bidkv.adapters.sglang.scheduler_hook import _refresh_priority_cache
@@ -742,7 +748,7 @@ class TestModeAScheduling:
 
         adapter = SGLangAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             experiment_strategy=strategy,
             experiment_strategy_name="slack_aware",
         )

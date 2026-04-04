@@ -34,12 +34,7 @@
 % ------------------------------------------------------------
 \newcommand{\placeholder}[1]{\textcolor{red}{\textbf{#1}}}
 
-% Named data macros (fill after full experiments)
-\newcommand{\bidkvSLOAttainment}{\placeholder{W\%}\xspace}
-\newcommand{\bidkvSLOGainOverHtwoO}{\placeholder{X\%}\xspace}
-\newcommand{\bidkvTTFTReductionOverHtwoO}{\placeholder{Y\%}\xspace}
-\newcommand{\numTests}{478\xspace}
-\newcommand{\numStrategies}{seven\xspace}
+% Named data macros — v8 mixed-workload frozen data
 
 % Shorthand
 \newcommand{\bidkv}{BidKV\xspace}
@@ -76,68 +71,7 @@
 % Abstract
 % ============================================================
 \begin{abstract}
-% Online large language model (LLM) serving faces dynamic KV cache pressure
-% caused by heterogeneous request lengths, bursty arrivals, and growing context
-% windows.  When memory pressure exceeds capacity, the serving engine must
-% \emph{preempt} one or more running requests to reclaim KV
-% cache---yet existing policies select victims with little
-% awareness of cross-request heterogeneity.  vLLM defaults to
-% LIFO ordering; token-level heuristics such as H2O apply a
-% fixed scoring rule to every request, without coordinating
-% preemption decisions across the batch.
-%
-% We present \bidkv, a bid-driven preemption scheduling primitive
-% that introduces \emph{explicit preemption-sensitivity signals}
-% (bids) as a first-class scheduling input.  Each active request
-% generates bids encoding the tokens freed upon
-% preemption~($\tokfree$) and a surrogate scheduling
-% cost~($\qualdelta$) derived from token-importance scores.
-% A constrained greedy solver ranks bids by the utility ratio
-% $\utilfn = \tokfree / (\qualdelta + \stabeps)$ and selects
-% victims that reclaim the most KV capacity per unit of
-% estimated scheduling disruption.  Under the recompute-fallback
-% execution model used in this work, preempted requests are
-% fully recomputed by the framework's native mechanism, so final
-% output quality is identical across all strategies; the
-% differentiation lies in scheduling efficiency---which requests
-% are preempted, how often, and at what recomputation cost.
-%
-% \bidkv is framework-portable: a four-layer adapter abstraction
-% enables integration with vLLM and SGLang without modifying
-% their source code.  We evaluate \bidkv with
-% Llama-3.1-8B-Instruct on an NVIDIA RTX A6000 using ShareGPT
-% traces under Poisson arrival.  Across seven strategies forming
-% a complete attribution chain, \bidkv achieves
-% \bidkvSLOAttainment SLO attainment at medium load
-% (\bidkvSLOGainOverHtwoO above H2O-Style) and reduces P95~TTFT
-% by \bidkvTTFTReductionOverHtwoO at high load, while
-% maintaining equivalent throughput.
-
-Online LLM serving engines must continuously reclaim key-value~(KV) cache from
-active requests when aggregate memory demand exceeds GPU capacity.  Existing
-policies select victims using order-based heuristics~(LIFO, FCFS) or
-per-request token-scoring rules, neither of which accounts for the
-heterogeneous recomputation cost that each eviction imposes under a
-recompute-fallback execution model.  We present \bidkv, a bid-based scheduling
-abstraction that separates the \emph{assessment} of per-request preemption
-sensitivity from the \emph{selection} of which requests to evict.  Each active
-request produces a structured \emph{bid} encoding the KV capacity it would
-release~($r$) and a surrogate disruption estimate~($\delta$) derived from an
-interchangeable scoring function.  A constrained greedy solver ranks bids by a
-utility ratio $U = r / (\delta + \varepsilon)$ and selects the victim set that
-recovers the required capacity at the lowest estimated aggregate disruption.
-The scorer--solver boundary is a first-class architectural interface: any
-token-importance scorer can be composed into the pipeline without modifying the
-solver, the bid protocol, or the runtime integration.  Under recompute-fallback
-semantics all strategies produce identical output; the differentiation lies in
-scheduling efficiency---which requests are preempted, how often, and at what
-recomputation cost.  \bidkv is framework-portable: a \texttt{FrameworkAdapter}
-abstraction enables non-invasive integration with vLLM and SGLang, reusing
-their native preemption and recovery paths.  Evaluated with Llama-3.1-8B-%
-Instruct on an NVIDIA RTX~A6000 using ShareGPT traces under Poisson arrivals,
-\bidkv reduces poorly targeted evictions in regimes where request heterogeneity
-makes selective reclamation beneficial, improving tail latency and SLO
-attainment relative to both order-based and token-scoring baselines.
+When KV-cache demand exceeds GPU memory capacity during online LLM serving, serving engines reclaim cache from active requests to admit waiting ones. Poor victim selection wastes recomputation, delays admission of queued requests, and degrades first-token latency---a metric directly visible to users. Existing policies rely on coarse request-order heuristics (LIFO, FCFS) or independent per-request scoring rules, lacking both explicit reclamation-cost signals and cross-request coordination. We present BidKV, a utility-guided reclamation policy that improves \emph{admission responsiveness} under KV pressure. Each active request produces a bid encoding recoverable capacity and estimated disruption cost; a coordinated solver selects victims that free the required capacity at minimum aggregate cost. The current prototype instantiates disruption cost from request-lifecycle proxies (completion progress, prompt length, preemption history) under recompute-fallback semantics. BidKV integrates non-invasively with vLLM and SGLang via a portable adapter layer. Evaluated with Llama-3.1-8B-Instruct on an NVIDIA RTX A6000 under ShareGPT traces, BidKV reduces P95 TTFT by 89\% and improves 300\,ms SLO attainment by 14.9\,pp over vLLM's native policy, at comparable throughput.
 \end{abstract}
 
 \maketitle
@@ -147,154 +81,123 @@ attainment relative to both order-based and token-scoring baselines.
 % ============================================================
 \section{Introduction}\label{sec:intro}
 
-Online LLM serving engines continuously multiplex GPU memory among a dynamic
-population of requests that differ widely in prompt length, generation budget,
-and arrival time~\cite{Kwon2023, Yu2022}.
-Under this heterogeneous, bursty workload, the key-value~(KV) cache---which
-stores per-token attention state for every in-flight
-request~\cite{Vaswani2017, Pope2023}---becomes the binding memory resource.
-Aggregate KV demand fluctuates on a sub-second timescale as new requests
-arrive, running requests extend their caches token by token, and completed
-requests release their allocations asynchronously.
-Whenever instantaneous demand exceeds GPU memory capacity, the serving engine
-must \emph{reclaim} KV cache from one or more \emph{active} requests to make
-room for others.
-This active-KV reclamation is not an exceptional event: under realistic
-mixed-length workloads with moderate concurrency, it occurs frequently and
-repeatedly throughout the lifetime of the system.
+Online large language model~(LLM) serving must sustain a continuously changing
+population of concurrent requests on limited GPU memory.  In production
+workloads, requests are highly heterogeneous in prompt length, generation
+budget, and arrival pattern; they also progress asynchronously as some requests
+are still in prefill while others are already deep into
+decoding~\cite{Kwon2023, Yu2022, Zheng2024lmsys}.  Under such mixed-length,
+bursty workloads, the key-value~(KV) cache becomes a dominant runtime
+resource~\cite{Vaswani2017, Pope2022}: new arrivals
+allocate KV state, ongoing requests expand it token by token, and completed or
+preempted requests release it at different points in their lifecycle.  Aggregate
+KV demand therefore fluctuates on short timescales and can repeatedly exceed
+available capacity during normal operation, forcing the serving engine to
+reclaim KV state from active requests to make room for others.
 
-The critical question during reclamation is not \emph{whether} to free KV
-capacity, but \emph{which request to evict}.
-Two requests may occupy similar amounts of KV cache, yet differ dramatically in
-the system cost of removing them.
-Under the \emph{recompute-fallback} execution model---where a preempted request
-is fully re-prefilled from scratch when it is rescheduled---the cost of a
-victim choice is dominated by the recomputation it induces: evicting a request
-that has generated most of its output discards a large amount of invested
-computation and triggers an expensive re-prefill, whereas evicting a request
-that has barely progressed beyond its prompt reclaims a comparable number of KV
-blocks at a fraction of the disruption.
-Moreover, a poorly targeted eviction can cascade: the recomputation it triggers
-re-inflates KV pressure, forcing further evictions and compounding tail-latency
-degradation.
-The problem is therefore not one of memory management in isolation, but a
-\emph{recomputation-aware, cross-request victim-selection problem under
-  active-KV reclamation}.
+The central question in this setting is not whether KV capacity must be
+reclaimed, but which active request should be chosen as the \emph{victim}.
+Two requests may occupy comparable amounts of KV memory while imposing very
+different costs when interrupted.  Under the \emph{recompute-fallback}
+execution model used by current serving engines~\cite{Kwon2023}, reclaiming an
+active request releases its KV state but forces the request to restart through
+the framework's native recovery path when it is rescheduled.  The cost of reclamation therefore
+depends not only on how much memory is freed, but also on how much useful
+computation is discarded and must later be redone.  Reclaiming a request that is
+near completion can waste substantial prior work and incur expensive
+recomputation, whereas reclaiming a request that has only recently entered
+decoding may free similar capacity at much lower system disruption.  Poor victim
+choices can also cascade: recomputation re-inflates KV demand, which in turn
+triggers further reclamation---a cycle that keeps KV capacity occupied by
+recomputing victims rather than available for waiting requests.  The direct
+consequence is admission-latency degradation: queued requests wait longer to
+receive their first token, driving up time-to-first-token~(TTFT) and eroding
+service-level objective~(SLO) attainment.  Active-KV reclamation is therefore a
+cross-request victim-selection problem whose quality directly governs admission
+responsiveness under sustained KV pressure.
 
-Existing approaches address related, but distinct, concerns at different layers
-of the stack—--and none of them closes the gap we identify:
+Because reclamation costs are heterogeneous, the scheduler needs
+\emph{explicit per-request cost signals} to distinguish cheap victims from
+expensive ones; because selection is cross-request, these signals must feed
+into \emph{coordinated batch-level selection} rather than independent
+per-request rules.  No existing system provides both.  Current scheduling
+heuristics---LIFO preemption~\cite{Kwon2023}, FCFS
+admission~\cite{Yu2022}, EDF-style waiting
+policies~\cite{Gujarati2020}---determine victim order without any
+per-request cost signal; broader serving innovations such as chunked
+prefills~\cite{Agrawal2024sarathiserve} and prefill--decode
+disaggregation~\cite{Zhong2024, Patel2024} advance throughput and resource
+placement but inherit the same order-based victim selection, leaving the
+signal gap intact.  Token-level scoring methods such as
+H2O~\cite{Zhang2023h2o} and StreamingLLM~\cite{Xiao2024} do produce
+request-specific importance signals, yet each applies a fixed scoring rule
+independently---without coordination across the batch, a locally reasonable
+per-request choice can be globally costly.  What is missing is a
+\emph{signal pathway}: a structured interface through which per-request
+reclamation sensitivity can be surfaced to the scheduler and used for
+coordinated cross-request victim selection.
 
-\begin{itemize}[leftmargin=*,nosep]
-\item \textbf{Order-based heuristics.}
-  vLLM defaults to LIFO preemption: the most recently admitted request is
-  evicted first, regardless of its progress or recomputation
-  cost~\cite{Kwon2023}.
-  Related policies---FCFS, shortest-job-first admission, EDF-based waiting
-  queues---improve \emph{admission} ordering but still treat all active
-  requests as interchangeable once they are running.
-  None of these schemes provides an explicit signal by which the scheduler
-  can reason about heterogeneous preemption costs.
+In this study we present \bidkv, a \emph{bid-based scheduling abstraction} for
+active-KV reclamation.  The key idea is to make reclamation sensitivity an
+explicit, structured signal rather than an implicit consequence of scheduling
+order.  Each active request produces a \emph{bid} that summarizes the KV
+capacity recoverable upon reclamation and a surrogate disruption estimate
+reflecting the relative penalty of reclaiming that request.  Given bids from all
+active requests, the scheduler solves a constrained cross-request selection
+problem: choose the victim set that recovers the required capacity while
+minimizing aggregate estimated disruption.  In this way, \bidkv turns victim
+selection from an opaque runtime behavior into an explicit interface between a
+\emph{scoring layer}---which estimates per-request reclamation
+sensitivity---and a \emph{coordinated selection layer}---which makes
+batch-level trade-offs across candidates.
 
-\item \textbf{Token-local scoring.}
-  Token-importance methods---H2O~\cite{Zhang2023h2o},
-  StreamingLLM~\cite{Xiao2024},
-  Scissor\-hands~\cite{Liu2023scissorhands}---assign scores to
-  individual tokens within a single request.
-  These scores capture useful local structure, but when repurposed to
-  guide cross-request eviction they apply a fixed rule identically to
-  every request, without coordinating across the batch or accounting for
-  heterogeneous recomputation costs.
-  A locally optimal score can therefore produce a globally costly victim
-  choice.
-
-\item \textbf{System-level scheduling and disaggregation.}
-  Orca-style iteration-level scheduling~\cite{Yu2022}, chunked
-  prefills~\cite{Agrawal2024sarathiserve}, and prefill--decode
-  disaggregation~\cite{Zhong2024, Patel2024} optimize batching granularity
-  and resource placement, but do not address the KV reclamation decision
-  itself: when they trigger preemption, they defer to the same order-based
-  victim selection.
-\end{itemize}
-
-\noindent
-Across all three categories, we identify a structural gap: no existing system
-provides an explicit \emph{signal pathway} through which per-request
-preemption sensitivity---however derived---can be communicated to the runtime
-scheduler and used for \emph{cross-request coordinated victim selection}.
-
-We present \bidkv, a \emph{bid-based scheduling abstraction} for active-KV
-reclamation.
-The key idea is to separate the concern of \emph{assessing} the cost of
-preempting a particular request from the concern of \emph{selecting} which
-requests to preempt.
-Each active request produces a structured \emph{bid} that encodes the KV
-capacity it would release upon preemption~($\tokfree$) and a surrogate
-disruption estimate~($\qualdelta$) derived from an interchangeable scoring
-function.
-$\qualdelta$ is not a measure of downstream output quality; it is a
-\emph{ranking signal} that captures heterogeneity in recomputation cost so that
-the scheduler can distinguish cheap victims from expensive ones.
-Given bids from all active requests, a constrained greedy solver ranks
-candidates by a utility ratio $\utilfn = \tokfree / (\qualdelta + \stabeps)$
-and selects the set of victims that recovers the required KV capacity at the
-lowest estimated aggregate disruption.
-This formulation makes the scorer--solver boundary a first-class architectural
-interface: the scoring strategy is a pluggable module satisfying a single
-\texttt{score()} protocol, while the solver is agnostic to how scores are
-produced.
-Any token-importance scorer---attention-based, gradient-based, or
-application-provided---can be composed into the same victim-selection pipeline
-without modifying the solver, the bid protocol, or the runtime integration.
-
-This paper studies \bidkv under the \emph{recompute-fallback} execution
-model, where a preempted request is fully re-prefilled by the framework's
-native recovery mechanism (\eg vLLM's \texttt{\_preempt\_request()}).
-Under this model, all strategies produce bitwise-identical output for a given
-input; the differentiation lies entirely in \emph{scheduling efficiency}---which
-requests are preempted, how often, and how much recomputation each eviction
-induces.
-We note that the benefit of selective reclamation is \emph{regime-dependent}:
-when KV pressure is low, all strategies behave similarly because preemption is
-rare; when pressure is extreme, the available choices narrow and selection has
-limited leverage.
-\bidkv is therefore designed as a \emph{schedulable, gate-able layer} that can
-gracefully degrade to the host framework's native policy in regimes where
-selective reclamation offers insufficient marginal benefit.
-
-\bidkv is implemented as a framework-portable scheduling layer rather than an
-invasive modification to any particular serving engine.
-A \texttt{Framework\-Adapter} abstraction encapsulates the five interaction
-points---KV statistics, pressure interception, victim injection, lifecycle
-management, and strategy routing---enabling non-invasive integration with both
-vLLM~\cite{Kwon2023} and SGLang~\cite{Zheng2024sglang} while fully reusing
-their native preemption and recovery paths.
-\bidkv changes \emph{which} request is reclaimed; it does not change how
-reclamation is executed.
+In the current prototype, the disruption estimate is instantiated from
+request-lifecycle features (completion progress, prompt length, preemption
+history) under recompute-fallback semantics~\cite{Kwon2023}.
+\bidkv integrates non-invasively with both vLLM~\cite{Kwon2023} and
+SGLang~\cite{Zheng2024sglang} via a portable adapter layer that fully reuses
+each framework's native reclamation and recovery paths---the fact that both
+integrations require no source-code modification confirms that the bid
+interface is cleanly separated from framework-specific scheduling internals.
+\bidkv controls \emph{which} request is reclaimed, not \emph{how}.  Under
+recompute-fallback execution, the policy does not alter final outputs; the
+differentiation lies entirely in scheduling efficiency.  The primary benefit is
+improved admission responsiveness: by selecting victims whose reclamation
+frees adequate capacity at low recompute cost, \bidkv reduces the time
+waiting requests spend queued for KV allocation, yielding lower TTFT and
+higher SLO attainment.  This comes at a modest cost in throughput and
+per-token decode latency, a tradeoff that favors latency-sensitive
+deployments.  The benefit is operating-regime dependent: under sustained
+mixed-length KV pressure, utility-guided selection provides substantial
+gains; under low pressure, victim selection remains governed by the
+framework's native ordering, with \bidkv's reorder activating only under
+sustained high-pressure conditions.
 
 \paragraph{Contributions.}
-\begin{enumerate}[label=\textbf{C\arabic*.},leftmargin=*,nosep]
-\item \textbf{Bid-based preemption-sensitivity interface.}
-  We introduce a structured \emph{bid} that allows any scoring strategy---or
-  an application-level policy---to convey per-request preemption sensitivity to
-  the runtime scheduler, replacing the implicit, one-size-fits-all victim
-  ordering of existing engines.
+\begin{enumerate}[leftmargin=*,nosep]
+\item \textbf{Bid-based reclamation interface.}
+  We introduce a structured bid abstraction that allows per-request
+  reclamation sensitivity to be surfaced to the runtime scheduler, replacing
+  implicit victim ordering rules with an explicit decision interface.
 
-\item \textbf{Scorer-agnostic scoring-to-selection architecture.}
-  We separate token-level importance scoring from request-level victim
-  selection through a scoring-to-bid layer and a constrained greedy solver,
-  so that the choice of scorer and the selection algorithm evolve
-  independently.
+\item \textbf{Decoupled scoring-to-selection architecture.}
+  We separate request-level disruption estimation from coordinated
+  cross-request victim selection through a structured bid interface,
+  so that selection operates on uniform cost--capacity pairs regardless
+  of how disruption estimates are produced.
 
-\item \textbf{Framework-portable runtime adapter.}
-  We define a \texttt{Framework\-Adapter} ABC and demonstrate non-invasive
-  integration with vLLM and SGLang, reusing each framework's native
-  preemption and recovery mechanisms without source-code modification.
+\item \textbf{Portable runtime integration.}
+  We realize \bidkv as a non-invasive scheduling layer with a
+  \texttt{Framework\-Adapter} abstraction, demonstrating integration with
+  vLLM and SGLang that reuses each framework's native reclamation and
+  recovery mechanisms without source-code modification.
 
-\item \textbf{Attribution-oriented evaluation.}
-  We evaluate seven strategies that form a structured attribution chain,
-  isolating the contributions of scheduling coordination, token scoring,
-  and explicit bid-based selection under controlled workloads and frozen
-  request traces.
+\item \textbf{Structured evaluation under controlled conditions.}
+  We evaluate five strategies that vary across scheduling dimensions
+  (admission ordering, running-queue reordering, victim selection logic,
+  and proactive reclamation) under frozen request traces and calibrated
+  arrival rates, supporting structured attribution across these co-varying
+  dimensions.
 \end{enumerate}
 
 % ============================================================
@@ -302,80 +205,107 @@ reclamation is executed.
 % ============================================================
 \section{Background and Motivation}\label{sec:background}
 
-\subsection{KV Cache in LLM Serving}\label{sec:bg:kvcache}
+\subsection{KV Cache Memory Model}\label{sec:bg:kvcache}
 
-Autoregressive Transformer decoders~\cite{Vaswani2017} compute attention as
-$\text{Attn}(Q,K,V) = \text{softmax}(QK^\top / \sqrt{d_k})\,V$, caching the
-key and value projections of all previously generated tokens.  For a model with
-$L$~layers, $H$~attention heads, and head dimension~$d_h$, the KV cache of a
-single request of length~$n$ occupies $2LHd_h n$ elements.  With bf16
-precision, Llama-3.1-8B ($L{=}32, H{=}8_{\text{kv}}, d_h{=}128$) allocates
-128\,KiB per token per request.
+Each autoregressive decoding step caches key and value
+projections~\cite{Vaswani2017} for all previously generated tokens.  For a
+model with $L$~layers, $H$~KV heads (via grouped-query
+attention~\cite{Ainslie2023}), and head dimension~$d_h$, a single request of
+length~$n$ stores $2LHd_h n$ elements.  With bf16 precision, Llama-3.1-8B-Instruct ($L{=}32,
+H{=}8_{\text{kv}}, d_h{=}128$) allocates 128\,KiB per token per
+request~\cite{Grattafiori2024}.  vLLM~\cite{Kwon2023} manages this state through
+PagedAttention: physical GPU memory is partitioned into fixed-size \emph{blocks}
+that are mapped to logical positions via a block table.  On a 48\,GiB
+A6000 with $\sim$16\,GiB occupied by model weights~\cite{Pope2023}, the
+remaining $\sim$32\,GiB of KV-allocatable memory can sustain roughly 260K
+tokens of concurrent KV state---a single 4096-token request already consumes
+$\sim$512\,MiB, or about 1.6\% of total KV capacity.
 
-Modern serving systems such as vLLM~\cite{Kwon2023} manage KV cache via
-PagedAttention, allocating physical memory in fixed-size \emph{blocks} mapped
-through a block table.  Despite this optimization, KV memory scales linearly
-with sequence length: a single 4096-token request occupies $\sim$512\,MiB,
-placing severe pressure on the $\sim$32\,GiB of KV-allocatable memory on a
-48\,GiB A6000.
+\subsection{The Victim-Selection Problem}\label{sec:bg:preemption}
 
-\subsection{The Preemption Problem}\label{sec:bg:preemption}
+When aggregate KV demand exceeds available capacity, the serving engine must
+reclaim KV state from one or more active requests.  Under recompute-fallback
+semantics~\cite{Kwon2023}, the victim's KV blocks are released and the request
+re-enters the waiting queue; when it is eventually rescheduled, its prompt is
+recomputed from scratch.  The scheduler's task at each reclamation event is
+therefore to choose a \emph{victim set} $V \subseteq \mathcal{R}$ from the set
+of active requests~$\mathcal{R}$ such that the total freed capacity meets the
+shortfall while minimizing aggregate recompute cost:
 
-When KV cache utilization exceeds capacity, the serving engine must
-\emph{preempt} running requests to free memory.  vLLM implements preemption via
-\texttt{\_preempt\_request()}: the victim's KV blocks are released, and the
-request re-enters the waiting queue for recomputation from scratch.  The default
-victim selection is LIFO---the most recently scheduled request is evicted
-first---which ignores request progress and recomputation cost.
-
-Consider three concurrent requests under memory pressure:
-\begin{itemize}[leftmargin=*,nosep]
-\item $R_1$: 128-token chat reply, 90\% generation complete.
-  Preempting wastes nearly all invested computation.
-\item $R_2$: 2048-token document summary, 10\% complete.
-  Preempting frees significant KV at low recomputation cost.
-\item $R_3$: 512-token code completion, 50\% complete.
-  Moderate recomputation cost.
-\end{itemize}
+\begin{equation}\label{eq:victim}
+  \min_{V \subseteq \mathcal{R}} \sum_{i \in V} c_i
+  \quad \text{s.t.} \quad
+  \sum_{i \in V} r_i \;\geq\; N,
+\end{equation}
 
 \noindent
-LIFO preempts whichever request was most recently scheduled, regardless of
-these differences.  A scheduler aware of per-request recomputation cost would
-preempt~$R_2$ first: it frees the most tokens at the lowest relative cost,
-yielding the highest utility ratio.  This example illustrates two requirements
-that motivate our design:
+where $r_i$ is the KV capacity freed by reclaiming request~$i$, $c_i$ is the
+recompute cost it will incur, and $N$ is the capacity shortfall.  This
+formulation is an instance of the minimum-cost covering
+problem~\cite{Kellerer2004}.  With
+heterogeneous requests, the choice of~$V$ matters: two requests may free
+comparable capacity yet differ by an order of magnitude in recompute cost.
+Existing engines do not solve this selection problem explicitly.  vLLM selects
+the most recently scheduled request (LIFO)~\cite{Kwon2023}; other systems apply
+FCFS~\cite{Yu2022} or EDF ordering~\cite{Gujarati2020}, none of which accounts
+for per-request reclamation cost.  This
+analysis motivates two requirements.  First, the scheduler should accept
+\emph{explicit per-request reclamation-sensitivity signals} that capture
+heterogeneity in reclamation cost, rather than relying solely on arrival or
+scheduling order.  Second, victim selection should perform \emph{cross-request
+coordination}---considering the batch-level trade-off between KV capacity freed
+and recompute cost incurred---rather than scoring each request in isolation.
 
-\begin{description}[style=unboxed,leftmargin=0em,nosep]
-\item[R1 --- Explicit preemption-sensitivity signals.]
-  The scheduler should accept per-request signals that capture heterogeneity in
-  preemption cost, rather than relying solely on arrival order or a single
-  fixed heuristic.
 
-\item[R2 --- Cross-request coordination.]
-  Victim selection should consider the \emph{batch-level} trade-off---how much
-  KV capacity is freed versus how much scheduling disruption is
-  incurred---rather than scoring each request in isolation.
+\paragraph{Empirical evidence.}
+Figure~\ref{fig:motivation} validates the above analysis with a KV-pressure
+snapshot drawn from a long-context ShareGPT trace (rate=0.5\,req/s).  We use a
+long-context scenario for this illustration because it amplifies per-request KV
+heterogeneity, making the victim-selection gap between LIFO and utility-guided
+policies maximally visible; the same gap arises under mixed-length workloads
+(Section~\ref{sec:eval}) at smaller absolute scale.
+Panel~(a) shows 10 concurrent requests at the moment of peak KV utilization,
+sorted by tokens held.
+LIFO targets R1 and R2---the requests with the largest KV footprints---yet
+these requests are 47\% and 34\% complete, incurring estimated recompute costs
+of $\sim$1{,}800 and $\sim$1{,}050~tokens respectively (red hatched bars).
+A utility-guided policy instead selects~R4, which is only~3\% complete: it
+frees 1{,}825~tokens while imposing a recompute cost of just~62~tokens---a
+29$\times$ improvement in recompute efficiency for this single victim choice.
 
-\item[R3 --- Scorer-agnostic design.]
-  Because the best importance signal may vary across workloads and models, the
-  scoring strategy (\eg attention weights, uniform, random) should be
-  pluggable without changing the selection algorithm.
+Panel~(b) aggregates the comparison over a target of freeing 20\% of total KV
+capacity.
+LIFO recovers 1.4$\times$ more tokens per event (by preferring larger
+requests), but at a 5.0$\times$ higher average recompute cost and a
+1.2$\times$ larger estimated cascade factor---the multiplier reflecting
+re-inflation of KV pressure as recomputed requests re-enter the running queue
+and re-acquire KV blocks.
+Coarse victim selection trades marginal extra KV recovery for a
+disproportionate recompute burden, compounding tail-latency degradation at
+every subsequent scheduling step.
 
-\item[R4 --- Framework portability.]
-  The mechanism should integrate with heterogeneous engines (\eg vLLM, SGLang)
-  without requiring source-code modifications, to facilitate adoption across
-  the serving ecosystem.
-\end{description}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_preliminary_motivation.pdf}
+\caption{Empirical motivation (long-context trace, ShareGPT, rate=0.5\,req/s).
+  \textbf{(a)}~Per-request KV footprint (blue) and estimated recompute cost
+  (red hatched) at a KV-pressure snapshot; 10 concurrent requests sorted by
+  KV tokens held, high$\to$low.
+  LIFO targets R1--R2 (34--47\% complete); utility-guided selects R4
+  (3\% complete, $29\times$ lower recompute cost).
+  \textbf{(b)}~Aggregate comparison freeing 20\% of total KV capacity:
+  LIFO imposes 5.0$\times$ higher average recompute cost and 1.2$\times$
+  larger cascade factor relative to utility-guided selection.}
+\label{fig:motivation}
+\end{figure}
+
 
 % ============================================================
 % §3  Related Work
 % ============================================================
 \section{Related Work}\label{sec:related}
 
-We organize related work into three categories and position \bidkv relative to
-each.
-
-\paragraph{A --- Request-level scheduling and preemption.}
+\paragraph{Request-level scheduling and preemption.}
 vLLM~\cite{Kwon2023} introduced PagedAttention with request-level preemption
 (swap or recompute) as the fallback under memory pressure.
 Orca~\cite{Yu2022} pioneered iteration-level scheduling but does not manage KV
@@ -392,7 +322,7 @@ These systems advance batching, placement, and memory management, but their
 preemption policies remain order-based (LIFO or FCFS) and do not incorporate
 per-request cost signals when selecting victims.
 
-\paragraph{B --- Token-level KV cache compression.}
+\paragraph{Token-level KV cache compression.}
 H2O~\cite{Zhang2023h2o} identifies ``heavy-hitter'' tokens via
 cumulative attention scores.
 Streaming\-LLM~\cite{Xiao2024} preserves attention-sink tokens
@@ -401,7 +331,7 @@ Scissorhands~\cite{Liu2023scissorhands} exploits persistence-of-importance.
 SnapKV~\cite{Li2024snapkv} clusters attention features to compress prefix
 cache.
 KIVI~\cite{Liu2024kivi} uses asymmetric 2-bit KV quantization.
-PyramidKV~\cite{Zhang2024pyramidkv} applies pyramid budgets across layers.
+PyramidKV~\cite{Zhang2025pyramidkv} applies pyramid budgets across layers.
 These methods effectively reduce per-request KV footprint, but each applies a
 fixed budget and scoring rule to every request independently.  They do not
 coordinate across the batch to reason about which \emph{request} to target, nor
@@ -409,7 +339,7 @@ do they expose a hook for external policies to influence the decision.
 \bidkv is complementary: its scoring layer can wrap any token-level scorer (\eg
 H2O) to derive per-request bid signals for cross-request coordination.
 
-\paragraph{C --- System-level QoS and scheduling theory.}
+\paragraph{System-level QoS and scheduling theory.}
 Dominant Resource Fairness~\cite{Ghodsi2011} and multi-resource
 packing~\cite{Grandl2014} optimize heterogeneous cluster resources.
 The knapsack literature~\cite{Martello1990, Kellerer2004} provides algorithmic
@@ -431,11 +361,30 @@ methods (which supply scoring signals) and to request-level scheduling systems
 % ============================================================
 \section{Design}\label{sec:design}
 
+The victim-selection problem identified in Section~\ref{sec:background}
+imposes two requirements: explicit reclamation-sensitivity signals and
+cross-request coordination.  Two additional design goals guide our architecture:
+\emph{scorer-agnostic interface}---because the best importance signal may vary
+across workloads and models, the scoring strategy should be interchangeable
+without modifying the selection algorithm or the runtime integration; and
+\emph{framework portability}---the mechanism should integrate with heterogeneous
+serving engines (\eg vLLM, SGLang) by reusing their native reclamation and
+recovery paths, without requiring source-code modifications.
+
+These goals separate naturally into a \emph{general architecture}---the
+bid-based data path and layered decomposition that are execution-model
+agnostic---and a \emph{current instantiated path}---the specific disruption
+estimator ($\qualdelta$, Eq.~\ref{eq:delta}) that uses request-lifecycle
+features under recompute-fallback semantics.  The architecture prescribes how
+scoring signals flow to the solver; the instantiation determines which features
+populate $\qualdelta$ in this paper.
+
+\noindent
 \bidkv organizes its logic into four layers (Figure~\ref{fig:architecture}): the
-\emph{Runtime Adapter Layer} detects KV pressure and executes preemptions via
+\emph{Runtime Adapter Layer} detects KV pressure and executes reclamations via
 the framework's native mechanism; the \emph{Scoring-to-Bid Layer} translates
 token-level scores into structured bids; the \emph{Constrained Solver Layer}
-selects preemption victims; and the \emph{Bid Signal Layer} defines the shared
+selects reclamation victims; and the \emph{Bid Signal Layer} defines the shared
 data structures used across all layers.
 
 \input{figures/fig1_architecture}
@@ -451,8 +400,13 @@ The atomic unit of communication is the \emph{scheduling bid}, a frozen
 \item $\tokfree$ (\texttt{tokens\_freed}) --- the number of KV tokens freed if
   this request is preempted.
 \item $\qualdelta$ (\texttt{quality\_delta}) --- a surrogate scheduling cost
-  $\in [0, 1]$ derived from token importance scores.  Lower values indicate
-  requests whose preemption incurs less scheduling disruption.
+  ($\geq 0$) estimating the system-level disruption of reclaiming this request.
+  Lower values indicate requests whose preemption incurs less scheduling
+  disruption.  The signal source depends on the execution model: under
+  recompute fallback (this work), $\qualdelta$ is derived from request-level
+  features (completion progress, prompt length, and preemption history;
+  Eq.~\ref{eq:delta}); under token-level truncation, it can be derived from
+  token importance scores.
 \item \texttt{confidence} $\in [0, 1]$ --- the scorer's confidence in
   $\qualdelta$.
 \item \texttt{metadata} --- strategy-specific information.
@@ -472,48 +426,27 @@ containing the accepted bid IDs, total freed tokens, and cumulative cost.
 
 \subsection{Scoring-to-Bid Layer}\label{sec:design:scoring}
 
-A core design principle is \emph{scorer-agnosticism}: the system does not
-prescribe which token importance metric to use.  It defines a minimal
-\texttt{ScoringStrategy} protocol:
-
-\begin{quote}
-{\small\texttt{score(token\_ids: Sequence[int], **ctx) -> list[float]}}
-\end{quote}
-
-\noindent
-Any object satisfying this protocol---returning per-token importance scores in
-$[0, 1]$---can serve as a scorer.  We implement four strategies:
-
-\begin{itemize}[leftmargin=*,nosep]
-\item \textbf{H2OScoring}~\cite{Zhang2023h2o}: cumulative attention-weight
-  scoring.  The production-intended scorer.
-\item \textbf{AttentionWeightScoring}: direct attention-weight extraction.
-\item \textbf{UniformScoring}: all tokens receive score~$0.5$.  Ablation
-  baseline.
-\item \textbf{RandomScoring}: i.i.d.\ uniform random. Ablation baseline.
-\end{itemize}
-
-Given scores, \texttt{build\_bids()} generates bids for a request at multiple
-scheduling aggressiveness levels $\ell \in \{0.2, 0.4, 0.6\}$:
-\begin{enumerate}[nosep]
-\item Sort tokens by importance in ascending order.
-\item Let $\tokfree = \lfloor n \cdot \ell \rfloor$.
-\item Compute $\qualdelta = \frac{1}{\tokfree} \sum_{j=1}^{\tokfree}
-  s_{\pi(j)}$, where $\pi$ is the ascending permutation.
-\item Emit a bid with these values.
-\end{enumerate}
-
-The mean importance of removed tokens serves as a surrogate scheduling cost.
-Because low-importance tokens are counted first, $\qualdelta$ increases
-sub-linearly with $\ell$, favoring moderate preemption.
-
-\textbf{Interpretation under recompute fallback.}  In the execution model used
-in this work, preempted requests are fully recomputed---output quality is
-preserved regardless of which request is selected.  The surrogate $\qualdelta$
-therefore does not represent actual quality degradation; it serves as a
-\emph{ranking signal} that captures cross-request heterogeneity in token
-importance distributions, enabling the solver to identify requests whose
-preemption has the least system-level impact.
+The scoring-to-bid layer translates per-request state into a structured bid.
+Under recompute-fallback execution, reclamation releases an entire request's
+KV state; each running request therefore produces a single bid with
+$\tokfree$ equal to its total KV footprint and $\qualdelta$ derived from
+request-level lifecycle features:
+\begin{equation}\label{eq:delta}
+  \qualdelta \;=\; 1 + w_c \cdot \mathit{completion}
+    + \frac{n_{\text{prompt}}}{n_{\text{ref}}}
+    + w_s \cdot \mathit{preemptions},
+\end{equation}
+where $\mathit{completion} = \min(1,\; n_{\text{output}} / n_{\max})$ is the
+fraction of output tokens already generated, $n_{\text{prompt}}$ is the prompt
+length, $\mathit{preemptions}$ is the number of prior evictions, and
+$w_c{=}0.5$, $n_{\text{ref}}{=}1000$, $w_s{=}0.8$ are fixed parameters.
+The completion term protects near-complete requests whose recomputation is
+expensive; the prompt-length term penalizes large-prompt victims whose
+recomputation cost is proportional to prompt size; and the preemption term
+provides anti-starvation, preventing repeated eviction of the same request.
+Because the entire request is recomputed upon rescheduling, output quality is
+preserved; $\qualdelta$ serves as a \emph{ranking signal} for scheduling
+efficiency, not a measure of quality degradation.
 
 \subsection{Constrained Solver Layer}\label{sec:design:solver}
 
@@ -527,7 +460,10 @@ The solver enforces two constraints:
 \begin{description}[style=unboxed,leftmargin=0em,nosep]
 \item[At-most-one bid per request:]  Prevents double-counting freed tokens.
 \item[Scheduling cost budget:]  The cumulative $\qualdelta$ must not exceed
-  $\dbudget$ (default~$0.15$), controlling preemption aggressiveness.
+  $\dbudget$ (default~$0.15$), controlling reclamation aggressiveness.
+  Under the request-level path (this work), $\dbudget$ is relaxed to
+  rank all candidates, since the solver's role is to produce a complete
+  victim ordering rather than to cap cumulative cost.
 \end{description}
 
 \noindent
@@ -544,7 +480,7 @@ small~\cite{Martello1990, Kellerer2004}.
 
 \subsection{Runtime Adapter Layer}\label{sec:design:adapter}
 
-To achieve framework portability~(R4), \bidkv defines a
+To achieve framework portability, \bidkv defines a
 \texttt{Framework\-Adapter} ABC with five responsibilities:
 
 \begin{enumerate}[nosep]
@@ -552,8 +488,8 @@ To achieve framework portability~(R4), \bidkv defines a
   for pressure detection.
 \item \textbf{Pressure-event interception}: intercepts the framework's
   native preemption path and invokes \bidkv's solver first.
-\item \textbf{Preemption execution}: delegates to the framework's
-  native mechanism (\eg vLLM \texttt{\_preempt\_request()}).
+\item \textbf{Reclamation execution}: delegates to the framework's
+  native preemption mechanism.
 \item \textbf{Scoring callback}: feeds attention weights or other signals back
   to the scoring strategy after each decode step.
 \item \textbf{Lifecycle management}: cleans up bids and state when a request
@@ -561,7 +497,7 @@ To achieve framework portability~(R4), \bidkv defines a
 \end{enumerate}
 
 This contract is intentionally minimal: any serving framework exposing KV
-statistics and a preemption hook can implement the adapter.
+statistics and a reclamation hook can implement the adapter.
 
 % ============================================================
 % §5  Implementation
@@ -570,27 +506,45 @@ statistics and a preemption hook can implement the adapter.
 
 \bidkv is implemented as a standalone Python package with \textbf{zero external
 dependencies} (Python $\geq$~3.10 standard library only), totaling
-$\sim$12,000~lines of code and \numTests unit tests.  The system defaults to
-\textbf{off} (\texttt{BidKVConfig(enabled=False)}) and includes a global
-\emph{kill switch} (\texttt{kill\_switch=True}) for instant bypass.  Seven
-strategies are registered through a \texttt{BaselineRegistry}; adding a new
-strategy requires one \texttt{register()} call.
+$\sim$12,000~lines of code.  The system defaults to \textbf{disabled}
+and includes a global kill switch for instant bypass in production.
+Strategies are managed through a pluggable registry; adding a new strategy
+requires implementing a single interface and one registration call.
 
 \subsection{vLLM Integration}\label{sec:impl:vllm}
 
 We integrate with vLLM 0.17.1 (v1 architecture) using its plugin system.  The
-adapter monkey-patches \texttt{Scheduler.\_\_init\_\_} to inject a scheduler
-hook at three points:
+adapter hooks into the scheduler initialization to intercept scheduling
+at three points:
 
 \begin{enumerate}[nosep]
-\item \textbf{Pre-schedule: victim reorder + proactive preemption.}
-  The hook sorts the running request list by a completion-aware \emph{keep
-  score} that accounts for output progress, estimated remaining tokens,
-  recompute cost, and an anti-starvation multiplier.  This ensures vLLM's
-  native \texttt{running.pop()} preempts the lowest-value request.
-  When KV utilization exceeds 88\%, the waiting queue is non-empty, and at
-  least three requests are running, the hook proactively preempts the
-  lowest-scored request with a 3-second cooldown.
+\item \textbf{Pre-schedule: admission reorder + victim selection + proactive
+  preemption.}
+  The hook executes four sub-steps before the native scheduling loop:
+  (a)~\emph{Waiting-queue reorder}: strategies apply their admission policy
+  (SJF by prompt length, EDF by deadline, or FCFS; see
+  Table~\ref{tab:strategy_diff}).
+  (b)~\emph{Priority cache refresh}: every 3\,s, each strategy's
+  \texttt{select\_victims()} is called on the running set to produce a
+  cached victim priority ordering.
+  (c)~\emph{Proactive preemption}: when KV utilization exceeds 90\%, the
+  waiting queue is non-empty, and at least three requests are running,
+  the hook proactively preempts the lowest-priority request
+  via the native preemption path with a 5-second cooldown.
+  PE and PE-SJF skip this step entirely (they measure the no-intervention
+  baseline).
+  (d)~\emph{SRPT preemption} (Static-Random, Largest-First only):
+  when KV utilization exceeds 80\%, a running request whose estimated
+  remaining work exceeds 1.2$\times$ the total cost of the best waiting
+  request is preempted (1.5\,s cooldown, ${<}$2 prior preemptions).
+  BidKV disables SRPT because recompute cost outweighs
+  the scheduling gain.
+  Finally, for strategies with running-queue reorder enabled, the hook
+  sorts the running list by cached priority so that vLLM's native
+  LIFO eviction removes the lowest-value request.
+  BidKV gates this reorder: it activates only when KV utilization exceeds
+  95\% \emph{and} the mean prompt length of running requests is at most
+  500\,tokens; otherwise the default LIFO order is preserved.
 
 \item \textbf{Post-decode tracking.}  After each step, newly sampled tokens
   are appended to per-request buffers for scoring.
@@ -601,39 +555,40 @@ hook at three points:
 
 \noindent
 \textbf{Execution semantics (recompute fallback).}
-When the solver selects a victim, the adapter calls vLLM's
-\texttt{\_preempt\_request()}, releasing all KV blocks
+When the solver selects a victim, the adapter invokes vLLM's
+native preemption mechanism, releasing all KV blocks
 and moving the request to the waiting queue for full
 recomputation.  \bidkv does not modify vLLM's KV cache
 coordinator or block pool---it only controls \emph{which}
-request is preempted.  Under this model, all strategies
-produce identical output quality; the differentiation lies
-in scheduling efficiency.
+request is reclaimed.  Under recompute-fallback semantics,
+the policy does not alter final outputs; the differentiation
+lies in scheduling efficiency.
 
 \paragraph{Strategy differentiation.}
-Table~\ref{tab:strategy_diff} summarizes how the seven strategies differ in
-their scheduling behavior.  All strategies share vLLM's native preemption
+Table~\ref{tab:strategy_diff} summarizes how the five strategies differ in
+their scheduling behavior.  All strategies share vLLM's native reclamation
 execution; the differentiation is in waiting-queue ordering, running-queue
-ordering, victim selection logic, and whether proactive preemption is enabled.
+ordering, victim selection logic, and whether proactive reclamation is enabled.
 
 \begin{table}[t]
 \centering
 \caption{Strategy differentiation across scheduling dimensions.  All share
-  the same execution mechanism (vLLM native \texttt{\_preempt\_request()}).}
+  the same execution mechanism (vLLM native preemption).
+  ``prio'' = completion-aware keep score; ``gated'' = reorder enabled only
+  when KV utilization ${>}95\%$ and mean prompt length ${\leq}500$.  SRPT =
+  shortest-remaining-processing-time preemption (KV${>}80\%$).}
 \label{tab:strategy_diff}
 \footnotesize
-\begin{tabular}{@{}l cccc@{}}
+\begin{tabular}{@{}l ccccc@{}}
 \toprule
 \textbf{Strategy} & \textbf{Wait} & \textbf{Run} & \textbf{Victims}
-  & \textbf{Proactive} \\
+  & \textbf{Proactive} & \textbf{SRPT} \\
 \midrule
-Preempt-Evict   & FCFS & LIFO & N/A       & \ding{55} \\
-Static-Random   & SJF  & prio & random    & \ding{51} \\
-H2O-Style       & SJF  & prio & H2O score & \ding{51} \\
-Uniform         & SJF  & prio & equal     & \ding{51} \\
-Global-NoBid    & SJF  & prio & inferred  & \ding{51} \\
-Slack-Aware     & EDF  & prio & slack     & \ding{51} \\
-\textbf{BidKV}  & SJF  & prio & $\utilfn{=}\frac{\tokfree}{\qualdelta+\stabeps}$ & \ding{51} \\
+PE (default)    & FCFS & LIFO & N/A       & \ding{55} & \ding{55} \\
+PE-SJF          & SJF  & LIFO & N/A       & \ding{55} & \ding{55} \\
+Static-Random   & SJF  & prio & random    & \ding{51} & \ding{51} \\
+Largest-First   & SJF  & prio & capacity  & \ding{51} & \ding{51} \\
+\textbf{BidKV}  & SJF  & gated & $\utilfn{=}\frac{\tokfree}{\qualdelta+\stabeps}$ & \ding{51} & \ding{55} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -642,7 +597,7 @@ Slack-Aware     & EDF  & prio & slack     & \ding{51} \\
 
 The \texttt{SGLangAdapter} integrates with SGLang's RadixAttention
 engine~\cite{Zheng2024sglang} by hooking the scheduling entry point.
-We evaluate a three-strategy subset (Preempt-Evict, Slack-Aware, \bidkv) to
+We evaluate a three-strategy subset (Preempt-Evict, Largest-First, \bidkv) to
 verify \emph{directional consistency}: that performance orderings observed on
 vLLM hold on an architecturally distinct framework.
 
@@ -651,210 +606,226 @@ vLLM hold on an architecturally distinct framework.
 % ============================================================
 \section{Evaluation}\label{sec:eval}
 
-We evaluate \bidkv along four dimensions: (1)~overall serving performance
+We evaluate \bidkv along three dimensions: (1)~overall serving performance
 (Section~\ref{sec:eval:main}), (2)~sensitivity to arrival rate
-(Section~\ref{sec:eval:rate}), (3)~preemption event analysis
-(Section~\ref{sec:eval:mechanism}), and (4)~tail latency breakdown
-(Section~\ref{sec:eval:ttft}).
+(Section~\ref{sec:eval:rate}), and (3)~reclamation event analysis
+(Section~\ref{sec:eval:mechanism}).
 
 \subsection{Experimental Setup}\label{sec:eval:setup}
 
 \paragraph{Hardware and model.}
 All experiments run on a single NVIDIA RTX A6000 GPU (48\,GiB) with CUDA~12.5.
-We serve Llama-3.1-8B-Instruct~\cite{Dubey2024} in bf16 precision
-($\sim$16\,GiB model weight), leaving $\sim$32\,GiB for KV cache.
+We serve Llama-3.1-8B-Instruct~\cite{Grattafiori2024} in bf16 precision
+($\sim$16\,GiB model weight).
 
 \paragraph{Inference engine.}
 vLLM 0.17.1 (v1 architecture) with PagedAttention~\cite{Kwon2023} serves as the
-primary quantitative platform.
+primary quantitative platform.  We limit GPU memory utilization to 0.5 and fix
+KV cache capacity at 600~blocks (9{,}600~tokens) to create sustained KV
+pressure across all request rates.
 
 \paragraph{Workload and traces.}
-We use a \emph{long-context} workload: 500~requests with prompt length
-$\geq 1024$~tokens sampled from the ShareGPT Vicuna unfiltered
-dataset~\cite{ShareGPT2023}, whose length distribution is representative of
-real-world LLM conversations~\cite{Zheng2024lmsys}.  Requests arrive according
-to a Poisson process (open-loop) at three rates: $\{0.35, 0.5, 0.7\}$~req/s.
-All traces are generated with seed~42 and verified via SHA-256 checksums; the
-same traces are shared across all strategies.
+We use a \emph{mixed-length} workload: 1{,}000~requests sampled from the ShareGPT
+Vicuna unfiltered dataset~\cite{ShareGPT2023}, whose length distribution is
+representative of real-world LLM conversations~\cite{Zheng2024lmsys}.
+Prompt lengths range from tens to thousands of tokens, creating heterogeneous
+KV footprints that exercise the victim-selection problem formalized in
+Section~\ref{sec:bg:preemption}: when the engine reclaims memory, requests differ
+substantially in both the KV capacity they free and the recomputation cost they
+impose.  Requests arrive according to a Poisson process (open-loop) at three
+rates: $\{2.0, 3.8, 5.7\}$~req/s.  All traces are generated with seed~42 and
+verified via SHA-256 checksums; the same traces are shared across all
+strategies.
 
 \paragraph{SLO definition.}
-A request meets its SLO if TTFT~$< 2000$\,ms and TPOT~$< 100$\,ms.
+We define SLO attainment as the fraction of requests whose TTFT falls below
+a given threshold.  We report SLO at 300\,ms in the main table---the strictest
+threshold that produces measurable strategy differentiation (3--6\,pp gaps).
+Goodput(500ms) already captures the 500\,ms threshold in throughput terms,
+making a separate SLO(500ms) column redundant.
+
+\paragraph{Metrics.}
+Five primary metrics capture serving quality across latency, throughput, and SLO
+dimensions:
+\emph{Goodput(500ms)}~\cite{Zhong2024}---the rate of completed
+requests whose TTFT~$\leq 500$\,ms, reflecting joint throughput-latency quality;
+\emph{SLO attainment at 300\,ms}---the fraction of requests whose
+TTFT~$\leq 300$\,ms;
+\emph{TTFT P95}---tail first-token latency;
+\emph{TPOT P95}~\cite{Agrawal2024sarathiserve}---95th-percentile per-token
+output time;
+and \emph{Normalized Latency}~\cite{Yu2022}---average end-to-end latency per
+output token, providing a scale-invariant comparison.
+All tail-latency metrics use P95 rather than P99: at our sample size
+(1{,}000~requests $\times$ 3~runs), P99 is determined by ${\sim}$10 extreme
+values per run, introducing high run-to-run variance compared with the
+${\sim}$50~values that determine P95.
 
 \paragraph{Baselines.}
-Seven strategies form a complete attribution chain:
+Five strategies form a layered comparison that separates contributions of
+waiting-queue ordering, running-queue reordering, proactive reclamation,
+and victim selection logic:
 \begin{enumerate}[nosep]
-\item \textbf{Preempt-Evict} (vLLM default): LIFO request-level preemption.
-\item \textbf{Static-Random}: randomly selects preemption victims.
-\item \textbf{H2O-Style}~\cite{Zhang2023h2o}: attention-based heavy-hitter
-  scoring for victim selection.
-\item \textbf{Uniform}: equal-weight victim scoring.
-\item \textbf{Global-NoBid}: system-inferred scheduling without user bids.
-\item \textbf{Slack-Aware}: SLO-deadline-aware victim selection.
-\item \textbf{\bidkv}: full system (H2O scoring $\to$ bids $\to$ greedy solver).
+\item \textbf{PE} (vLLM default): FCFS admission, LIFO preemption, no
+  proactive reclamation.
+\item \textbf{PE-SJF}: PE plus shortest-job-first waiting-queue ordering;
+  isolates the SJF contribution without changing the running queue or
+  victim logic.
+\item \textbf{Static-Random}: SJF admission, proactive reclamation with
+  random victim selection.
+\item \textbf{Largest-First}: capacity-greedy victim selection---evicts
+  the request occupying the most KV blocks.
+\item \textbf{\bidkv}: full system---completion-aware cost estimation
+  ($\qualdelta$, Eq.~\ref{eq:delta}) $\to$ bids $\to$ utility-ratio
+  greedy solver, with pressure-gated running reorder.
 \end{enumerate}
 
-The chain enables precise ablation:
-\emph{Preempt-Evict $\to$ H2O-Style $\to$ Global-NoBid $\to$ \bidkv}
-isolates the value of token-level scoring, system-level coordination, and
-explicit bids.  Each configuration is repeated three times with mean reported.
+\noindent
+The progression \emph{PE $\to$ PE-SJF $\to$ Largest-First $\to$ \bidkv}
+incrementally introduces SJF admission ordering, proactive reclamation with
+capacity-greedy victim selection, and coordinated bid-based selection.  Note
+that steps in this chain change multiple dimensions simultaneously
+(Table~\ref{tab:strategy_diff}); we use this structure to attribute
+performance differences to groups of co-varying features rather than to
+claim strict single-variable isolation.  Each configuration is repeated three
+times; we report the mean across runs.
 
 \subsection{Main Comparison}\label{sec:eval:main}
 
 \input{tables/table1_main}
 
-Table~\ref{tab:main} and Figure~\ref{fig:main_comparison} present the primary
-results at the medium arrival rate (0.5~req/s).
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{figures/fig1_main_comparison.pdf}
-\caption{Main comparison (long-context, rate=0.5\,req/s, vLLM).  Left: SLO
-  attainment---\bidkv achieves 76.8\%, 13\% above H2O-Style's 68.2\%.
-  Center: TTFT P95---H2O-Style is worst at 9.8\,s; \bidkv matches the best
-  group at 6.3\,s.  Right: TPOT P95---all strategies within a narrow range.}
-\label{fig:main_comparison}
-\end{figure*}
+Table~\ref{tab:main} presents the primary results at the medium arrival rate
+(3.8~req/s), where KV pressure is sustained but the system is not saturated.
 
 \paragraph{Key findings.}
 \begin{itemize}[leftmargin=*,nosep]
-\item \textbf{\bidkv achieves the highest SLO attainment} at 76.8\%, followed
-  by Static-Random (76.2\%), Slack-Aware and Global-NoBid (75.8\%), and
-  Preempt-Evict (75.0\%).  The improvement over H2O-Style (68.2\%) is
-  8.6~percentage points---a 13\% relative gain.
+\item \textbf{\bidkv achieves the best TTFT P95 and second-best SLO
+  at rate\,=\,3.8.}
+  TTFT~P95 is 631\,ms, 5\% below PE-SJF (666\,ms) and 7\% below Largest-First
+  (677\,ms).  SLO(300ms) reaches 83.2\%, 0.9\,pp below Static-Random
+  (84.1\%) but 3.3\,pp above Largest-First (79.9\%) and 14.8\,pp above PE (68.4\%).
 
-\item \textbf{H2O-Style is the worst-performing strategy} despite using the most
-  sophisticated token-level scoring.  Its TTFT~P95 of 9.8\,s is 56\% higher than
-  \bidkv's 6.3\,s, and its SLO attainment is 8.6~pp lower.  This demonstrates
-  that aggressive token-level heuristics can \emph{harm} system performance when
-  applied to preemption scheduling without cross-request coordination.
+\item \textbf{SRPT-enabled strategies lead on throughput metrics.}
+  Static-Random and Largest-First, which enable SRPT aggressive preemption
+  (KV\,$>$\,80\%), achieve the highest Goodput (3.25 and 2.67\,req/s
+  vs.\ \bidkv 3.16) and lowest TPOT P95 (91\,ms vs.\ \bidkv
+  107\,ms).  However, Static-Random's TTFT P95 is ${\sim}$2$\times$ higher
+  (1216\,ms vs.\ \bidkv 631\,ms), indicating aggressive throughput
+  reclamation at the expense of admission latency.
 
-\item \textbf{Throughput is equivalent across all strategies} at $\sim$0.455
-  req/s, confirming that \bidkv's scheduling overhead is negligible.
+\item \textbf{\bidkv provides the best latency--throughput balance.}
+  Among strategies with sub-700\,ms TTFT P95 at rate\,=\,3.8 (\bidkv,
+  PE-SJF, Largest-First), \bidkv achieves the highest Goodput (3.16 vs.\ 2.97
+  and 2.67) and SLO (83.2\% vs.\ 79.6\% and 79.9\%).  Static-Random
+  trades ${\geq}$1.2\,s TTFT P95 for higher throughput---a
+  tradeoff that is unfavorable for latency-sensitive deployments.
 
-\item \textbf{TPOT P95 varies minimally} (88.2--95.6\,ms), indicating that
-  decode-phase performance is dominated by model computation, not scheduling.
+\item \textbf{Throughput reflects the SRPT tradeoff.}
+  SRPT aggressively preempts longer-running requests when KV usage
+  exceeds 80\%, freeing capacity for waiting requests but increasing
+  recomputation for evicted victims.  \bidkv disables SRPT because its
+  utility-ratio scoring already accounts for estimated recompute cost
+  via the surrogate disruption term~$\qualdelta$, avoiding the
+  cascading preemptions that aggressive reclamation can trigger.
 \end{itemize}
 
-\paragraph{Attribution chain analysis.}
-The attribution chain reveals where each design choice contributes:
-(1)~Preempt-Evict $\to$ Global-NoBid (+0.8~pp SLO): coordinated scheduling with
-    SJF~waiting and cached-priority running adds modest value over LIFO.
-(2)~Global-NoBid $\to$ BidKV (+1.0~pp SLO): explicit bid signals provide
-    incremental improvement over system-inferred scheduling.
-(3)~H2O-Style $\to$ BidKV (+8.6~pp SLO): the largest gap, showing that
-    quality-aware cross-request coordination is critical---local token scoring
-    without global coordination actively hurts performance.
+\paragraph{Attribution chain.}
+The layered comparison separates three groups of co-varying features:
+(1)~\emph{PE $\to$ PE-SJF} ($+$11.2\,pp SLO at 300ms):
+  adding SJF waiting-queue ordering admits short-prompt requests earlier.
+(2)~\emph{PE-SJF $\to$ Largest-First} ($+$0.3\,pp SLO at 300ms):
+  adding proactive reclamation and capacity-greedy victim selection;
+  the small SLO increment suggests that proactive reclamation alone, without
+  coordinated cost signals, provides limited additional benefit.
+(3)~\emph{Largest-First $\to$ BidKV} ($+$3.3\,pp SLO at 300ms):
+  replacing per-request heuristic scoring with coordinated utility-ratio
+  selection and pressure-gated running reorder, yielding the largest
+  single-step Goodput gain (6.4\%).
 
 \subsection{Rate Sensitivity}\label{sec:eval:rate}
 
 \input{tables/table2_rate_full}
 
-Table~\ref{tab:rate_full} and Figures~\ref{fig:rate_sweep}--\ref{fig:slo_rate}
-show how performance scales across three arrival rates.
+Table~\ref{tab:rate_full} and Figure~\ref{fig:rate_sweep} show how performance
+scales across three arrival rates.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig3_rate_sensitivity.pdf}
-\caption{Rate sensitivity (long-context, vLLM).  (a)~TTFT P95 vs.\ request
-  rate (log scale): H2O-Style diverges dramatically at rate=0.7 (61.8\,s vs.\
-  \bidkv's 40.2\,s, a 35\% reduction).  (b)~Throughput scales linearly for
-  all strategies except H2O-Style, which saturates at 0.57\,req/s.}
+\caption{Rate sensitivity (mixed workload, vLLM).  (a)~Goodput(500ms) vs.\
+  request rate: SRPT-enabled strategies (Static-Random, Largest-First) lead at
+  high rates; \bidkv leads among non-SRPT strategies.
+  (b)~TTFT P95 vs.\ rate: \bidkv maintains the best or near-best tail
+  latency at low and medium load; at high load, PE-SJF's zero-eviction
+  policy yields the lowest TTFT P95.}
 \label{fig:rate_sweep}
 \end{figure*}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figures/fig3b_slo_attainment.pdf}
-\caption{SLO attainment vs.\ request rate.  At rate=0.35, all strategies
-  achieve $\sim$92\%.  At rate=0.5, \bidkv leads at 76.8\% while H2O-Style
-  drops to 68.2\%.  At rate=0.7, all drop below 10\%, but \bidkv (8.2\%)
-  and Preempt-Evict (8.8\%) maintain the best performance.}
-\label{fig:slo_rate}
-\end{figure}
-
 \paragraph{Three operating regimes.}
 
-\emph{Low load (rate=0.35):}
-KV pressure is minimal; preemption is rarely triggered ($\leq$29 events across
-all strategies).  All strategies achieve 91--92\% SLO attainment, confirming
-that scheduling sophistication adds no value when pressure is absent.
+\emph{Low load (rate\,=\,2.0):}
+KV pressure is largely absorbed by rapid request turnover.  Most strategies
+achieve $\geq$92\% SLO(300ms), with \bidkv leading at 97.0\% (vs.\
+Static-Random 96.5\%, PE-SJF 94.2\%).  \bidkv wins all four
+metrics at this rate, though the absolute margins are small---the
+throughput spread among the top strategies is $\leq$0.02\,req/s and
+all achieve $\geq$94\% SLO.
 
-\emph{Medium load (rate=0.5):}
-KV pressure is moderate (85--95 proactive preemptions for active strategies).
-\bidkv's quality-aware victim selection achieves 76.8\% SLO vs.\ H2O-Style's
-68.2\%---the primary differentiating regime.
+\emph{Medium load (rate\,=\,3.8):}
+Sustained KV pressure forces proactive reclamation.  This is the primary
+differentiating regime.  Static-Random leads on throughput and TPOT,
+enabled by SRPT aggressive preemption.  However, its TTFT P95 (1216\,ms) is
+nearly 2$\times$ that of \bidkv (631\,ms), which achieves the best tail
+latency while maintaining competitive SLO (83.2\%, $+$3.3\,pp over
+Largest-First).  Among non-SRPT strategies, \bidkv leads on all four
+metrics, confirming that coordinated utility-based victim selection adds
+value beyond per-request heuristics.
 
-\emph{High load (rate=0.7):}
-All strategies saturate and SLO drops below 10\%.  The key distinction is
-between strategies that cause cascading recompute storms and those that do not.
-\textbf{Conservative group} (Preempt-Evict: 8.8\%, Global-NoBid: 8.0\%,
-BidKV: 8.2\%) maintains TTFT~P95 at 39--42\,s.
-\textbf{Aggressive group} (H2O-Style: 3.6\%, Static-Random: 3.8\%, Uniform:
-3.8\%, Slack-Aware: 3.8\%) suffers TTFT~P95 of 48--62\,s.
+\emph{High load (rate\,=\,5.7):}
+Pressure is intense; all strategies degrade.  SRPT-enabled strategies
+(Static-Random, Largest-First) lead on throughput.
+\bidkv ranks competitively on SLO while maintaining lower TTFT.
+For TTFT P95, PE-SJF's zero-eviction approach yields the best tail latency
+(727\,ms), followed by Largest-First (793\,ms) and \bidkv (797\,ms)---a
+70\,ms gap (9\%) to PE-SJF.  However, PE-SJF's throughput is 14\% below
+\bidkv and its SLO is 6.4\,pp lower, indicating that the tail
+advantage does not translate to overall serving quality.
 
-\paragraph{Why aggressive heuristics fail under high load.}
-H2O-Style triggers 188 preemptions at rate=0.7 and frees the most tokens per
-preemption (Figure~\ref{fig:preempt_analysis}), yet achieves the \emph{worst}
-TTFT~P95 (61.8\,s).  Its token-level scoring identifies and preempts requests
-with the highest attention-weight concentrations---but these are often the
-requests closest to completion.  Preempting near-complete requests maximizes
-tokens freed per event but triggers cascading recompute: the preempted
-request must restart from scratch, consuming KV capacity anew and pressuring
-the system to preempt again.  \bidkv avoids this trap by incorporating
-recompute cost into its utility calculation, selecting victims whose
-preemption causes the least cascading disruption.
-
-\subsection{Preemption Event Analysis}\label{sec:eval:mechanism}
+\subsection{Reclamation Event Analysis}\label{sec:eval:mechanism}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/fig5_compress_coverage.pdf}
-\caption{Preemption event analysis (rate=0.7).  Left bars: eviction count.
-  Right bars: total tokens freed ($\times$1000).  H2O-Style triggers 188
-  evictions freeing $\sim$700K tokens---the most per event---yet achieves the
-  worst TTFT, suggesting poorly targeted victim selection.  \bidkv: 207
-  evictions, 428K tokens freed, with 35\% lower TTFT.}
+\caption{Reclamation event analysis (mixed workload, rate\,=\,3.8).
+  Left bars: proactive eviction count.  Right bars: total tokens freed
+  ($\times$1000).  \bidkv balances eviction frequency and tokens freed per
+  event, avoiding the extremes of too-aggressive or too-passive policies.}
 \label{fig:preempt_analysis}
 \end{figure}
 
-Figure~\ref{fig:preempt_analysis} reveals the mechanism behind the performance
-differences at rate=0.7:
+Figure~\ref{fig:preempt_analysis} reveals the mechanism behind the
+rate\,=\,3.8 performance differences:
 
 \begin{itemize}[leftmargin=*,nosep]
-\item \textbf{Preempt-Evict} triggers zero proactive preemptions, relying
-  entirely on vLLM's reactive LIFO mechanism.  This avoids recompute cascades
-  but forfeits the opportunity to preemptively free memory.
+\item \textbf{PE and PE-SJF} trigger zero proactive evictions, relying
+  entirely on vLLM's reactive LIFO mechanism.  This avoids recompute cost
+  but forfeits the opportunity to free memory for waiting requests, resulting
+  in high TTFT and low throughput.
 
-\item \textbf{H2O-Style} triggers fewer proactive preemptions (188) than
-  most active strategies but frees the most tokens per event ($\sim$700K total).
-  This indicates it preempts \emph{large, high-value} requests---exactly the
-  wrong victims, as their recomputation consumes the most resources.
+\item \textbf{Largest-First} selects victims by KV occupancy, targeting the
+  request holding the most cache blocks.  Without considering cross-request
+  recomputation cost, this occasionally targets near-complete requests whose
+  recompute is expensive, causing cascading pressure.
 
-\item \textbf{\bidkv} triggers 207 preemptions freeing 428K tokens (fewer
-  tokens per event).  Its utility-ratio ranking preferentially selects
-  \emph{small, low-cost} victims---requests where preemption frees adequate KV
-  without expensive recompute, yielding 35\% lower TTFT~P95 than H2O-Style.
+\item \textbf{\bidkv} uses the utility ratio $U = r / (\delta + \varepsilon)$
+  to rank victims.  The disruption term~$\delta$ grows with completion progress
+  and prior preemption count, steering selection toward requests whose
+  eviction frees adequate capacity at low recompute cost.  This produces
+  the best combined throughput and TTFT~P95.
 \end{itemize}
 
-\subsection{TTFT Tail Latency Breakdown}\label{sec:eval:ttft}
 
-\begin{figure*}[t]
-\centering
-\includegraphics[width=\textwidth]{figures/fig6_ttft_grouped_bar.pdf}
-\caption{TTFT P95 across strategies and arrival rates.  At rate=0.35, all
-  strategies cluster at 3--4\,s.  At rate=0.5, H2O-Style (9.8\,s) is clearly
-  the outlier.  At rate=0.7, H2O-Style explodes to 61.8\,s while \bidkv
-  and Preempt-Evict remain at $\sim$40\,s.}
-\label{fig:ttft_grouped}
-\end{figure*}
 
-Figure~\ref{fig:ttft_grouped} visualizes TTFT~P95 across all strategies and
-rates, making the severity of H2O-Style's degradation visually apparent.
-The grouping confirms two key findings: (1)~at low load, scheduling strategy is
-irrelevant; (2)~at medium and high load, quality-aware victim selection
-(\bidkv) and conservative no-proactive approaches (Preempt-Evict) both
-outperform aggressive heuristics, with \bidkv offering the best overall balance
-by combining proactive scheduling with intelligent victim selection.
 
 % ============================================================
 % Symbol Table
@@ -869,7 +840,7 @@ by combining proactive scheduling with intelligent victim selection.
 \textbf{Symbol} & \textbf{Meaning} \\
 \midrule
 $\tokfree$     & Tokens freed by preempting the bid's request \\
-$\qualdelta$   & Surrogate scheduling cost $\in [0, 1]$ \\
+$\qualdelta$   & Surrogate scheduling cost (Eq.~\ref{eq:delta}) \\
 $\stabeps$     & Stability term ($= 10^{-3}$) \\
 $\utilfn$      & Utility ratio $= \tokfree / (\qualdelta + \stabeps)$ \\
 $\dbudget$     & Scheduling cost budget (max cumulative $\qualdelta$) \\
@@ -884,49 +855,38 @@ $\numbids$     & Total number of bids in the pool \\
 % ============================================================
 \section{Discussion and Limitations}\label{sec:discussion}
 
-\subsection{Surrogate Scheduling Cost}\label{sec:discuss:surrogate}
+\subsection{Surrogate Disruption Estimate}\label{sec:discuss:surrogate}
 
-The quality delta~$\qualdelta$ in each bid is a \emph{surrogate parameter}
-derived from token-level importance scores, not a direct measurement of
-downstream output quality.  Under the recompute-fallback execution model,
-preempted requests are fully recomputed by vLLM's native mechanism---the final
-output is identical regardless of which strategy selected the victim.
+The surrogate cost~$\qualdelta$ in each bid is a \emph{ranking signal}
+derived from request-level features (completion progress, prompt length,
+and preemption history; Eq.~\ref{eq:delta}), not a direct measurement of
+downstream output quality or precise recomputation cost.  Under the
+recompute-fallback execution model, reclaimed requests are fully recomputed
+by vLLM's native mechanism---the policy does not alter final outputs under
+the same recovery semantics.
 
 $\qualdelta$ therefore controls \emph{scheduling aggressiveness}: a low
-$\dbudget$ makes the solver conservative (fewer preemptions), while a high
+$\dbudget$ makes the solver conservative (fewer reclamations), while a high
 $\dbudget$ allows more aggressive scheduling.  The solver does not trade output
-quality for throughput; it trades preemption frequency and victim selection
-quality for scheduling efficiency.
+quality for throughput; it trades reclamation frequency and victim choice
+for scheduling efficiency.
 
 Calibrating $\qualdelta$ against task-level metrics (\eg ROUGE, exact match)
-becomes relevant in a \emph{token-level truncation} execution model (Mode~B),
-where preempted tokens are permanently discarded rather than recomputed.  We
-leave this as future work.
+becomes relevant under a \emph{token-level truncation} execution model,
+where selected tokens are permanently discarded rather than recomputed.
 
 \subsection{Limitations}
 
 \begin{itemize}[leftmargin=*,nosep]
 \item \textbf{Single GPU.}  All experiments use a single A6000.  Multi-GPU
   deployments may introduce coordination overhead for bid collection.
-\item \textbf{Single model scale (8B).}  Larger models (70B+) with different
-  KV-to-weight ratios need further validation.
-\item \textbf{Moderate differentiation at medium load.}  Against most baselines,
-  \bidkv's SLO advantage at rate=0.5 is 1--2~pp.  The large gain
-  ($+$8.6~pp) is primarily over H2O-Style; \bidkv's value proposition
-  strengthens as scheduling sophistication increases.
-\item \textbf{High-load saturation.}  At rate=0.7, all strategies drop below
-  10\% SLO.  \bidkv mitigates but cannot prevent saturation; capacity
-  scaling (\eg multi-GPU, request routing) is needed.
+\item \textbf{Single model scale.}  We evaluate on Llama-3.1-8B-Instruct.
+  Larger models (70B+) with different KV-to-weight ratios may exhibit
+  different pressure dynamics.
+\item \textbf{Recompute-fallback execution.}  Preempted requests incur full
+  recomputation.  Token-level truncation could reduce this cost by selectively
+  discarding tokens rather than evicting entire requests.
 \end{itemize}
-
-\subsection{Future Work: Token-Level Truncation (Mode~B)}
-
-The current recompute-fallback model (Mode~A) preserves output quality but
-incurs full recomputation cost.  A token-level truncation model (Mode~B) would
-permanently discard selected tokens rather than recomputing, creating a true
-quality--throughput tradeoff where $\qualdelta$ directly measures output
-degradation.  This requires kernel-level integration for partial KV block
-release and task-level quality evaluation, which we leave as future work.
 
 \subsection{Broader Impact}
 
@@ -941,25 +901,36 @@ starvation of low-priority requests.
 % ============================================================
 \section{Conclusion}\label{sec:conclusion}
 
-We presented \bidkv, a quality-aware preemption scheduling primitive for
-online LLM serving.  By introducing explicit quality preference signals (bids)
-into the preemption decision, \bidkv enables cross-request coordination that
-selects victims based on the utility ratio
-$\utilfn = \tokfree / (\qualdelta + \stabeps)$ rather than arbitrary LIFO
-ordering or fixed heuristics.
+We presented \bidkv, a bid-based scheduling abstraction for active-KV
+reclamation in online LLM serving.  \bidkv surfaces per-request reclamation
+sensitivity as an explicit, structured signal and solves a coordinated
+cross-request victim-selection problem, replacing implicit ordering heuristics
+with a utility-guided decision interface
+($\utilfn = \tokfree / (\qualdelta + \stabeps)$).  The current prototype
+instantiates the disruption estimate~$\qualdelta$ from request-lifecycle
+features (completion progress, prompt length, preemption history) under
+recompute-fallback semantics; under this execution model the policy does not
+alter final outputs, and the differentiation lies entirely in scheduling
+efficiency---which requests are reclaimed, how often, and at what
+recomputation cost.
 
-Through a seven-baseline attribution chain on vLLM with
-Llama-3.1-8B-Instruct, we demonstrated that \bidkv achieves 76.8\% SLO
-attainment---13\% higher than H2O-Style---and reduces P95~TTFT by 35\% under
-high load.  The results reveal that aggressive token-level heuristics can
-actively harm system performance when used for preemption scheduling without
-global coordination, while quality-aware victim selection avoids cascading
-recompute storms.
+Through a five-strategy evaluation on vLLM with Llama-3.1-8B-Instruct under
+mixed-length ShareGPT workloads, we showed that \bidkv achieves the best
+cross-rate SLO attainment and TTFT P95, outperforming
+both capacity-greedy heuristics and default scheduling baselines.  At low
+load, \bidkv leads on all four metrics.  At higher load, strategies that
+enable aggressive SRPT preemption trade tail latency for throughput; \bidkv
+provides the best latency--throughput balance under sustained KV pressure.
+The value of coordinated reclamation is regime-dependent: the benefit is most
+pronounced when heterogeneous request lifecycles create actionable differences
+in reclamation cost.
 
-\bidkv's framework-portable design integrates with both vLLM and SGLang without
-source-code modifications, requiring zero external dependencies.  Future work
-includes token-level truncation for direct quality--throughput tradeoff,
-fairness-aware solver extensions, and multi-GPU coordination.
+\bidkv integrates with both vLLM and SGLang via a portable adapter
+abstraction, reusing each framework's native reclamation and recovery paths
+without source-code modification.  The scorer--solver separation enables
+independent evolution of scoring strategies and selection algorithms.  Future
+work includes token-level truncation for partial KV release, fairness-aware
+solver extensions, and multi-GPU coordination.
 
 % ============================================================
 % References

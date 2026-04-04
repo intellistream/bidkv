@@ -91,11 +91,11 @@ def _install_bidkv_hooks(scheduler: object, strategy_name: str) -> None:
     from bidkv.config import BidKVConfig
     from bidkv.experiments.sglang.config import STRATEGY_BASELINE_MAP
     from bidkv.pressure import PressureConfig
-    from bidkv.scoring import H2OScoring
+    from bidkv.scoring import PositionalScoring
     from bidkv.solver import SolverConfig
 
     config = BidKVConfig(enabled=True, kill_switch=False, delta_budget=0.30)
-    scoring = H2OScoring()
+    scoring = PositionalScoring()
 
     pressure_config = PressureConfig(
         enabled=True,

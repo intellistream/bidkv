@@ -1,6 +1,6 @@
 """Phase 2: Pilot calibration — rate sweep to find effective eviction pressure zones.
 
-Protocol §2-P2 & §3-Phase2: use 2 representative strategies (preempt-evict + h2o-style)
+Protocol §2-P2 & §3-Phase2: use 2 representative strategies (preempt-evict + largest-first)
 with 50% request count (seed=99) to find rate_low / rate_mid / rate_high for each workload.
 
 Usage
@@ -32,7 +32,7 @@ from bidkv.experiments.vllm.runner import VLLMExperimentRunner
 logger = logging.getLogger(__name__)
 
 # Phase 2 pilot strategies (§3 [2-2])
-PILOT_STRATEGIES = ("preempt-evict", "h2o-style")
+PILOT_STRATEGIES = ("preempt-evict", "largest-first")
 
 # Rate sweep sequence: start at 0.5, multiply by 1.5 each step (§3 [2-1])
 MAX_RATE_STEPS = 15
@@ -126,7 +126,10 @@ def _extract_observation(
         p99_ttft = ttfts[p99_idx]
 
     # Eviction metrics from adapter
-    eviction_count = int(result.adapter_metrics.get("total_compressions", 0))
+    _am = result.adapter_metrics
+    eviction_count = int(
+        _am.get("total_evictions", _am.get("total_compressions", 0)),
+    )
     if eviction_count == 0:
         # Also check preemption count for preempt-evict
         eviction_count = int(result.adapter_metrics.get("total_preemptions", 0))
@@ -174,7 +177,7 @@ def run_pilot_calibration(
     """Run Phase 2 pilot calibration.
 
     For each workload, sweeps rates from 0.5 req/s upward (×1.5 per step),
-    running preempt-evict and h2o-style at each rate. Stops when OOM or
+    running preempt-evict and largest-first at each rate. Stops when OOM or
     timeout exceeds 20%.
 
     Parameters

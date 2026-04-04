@@ -9,7 +9,7 @@
 
 这是最准确的评分方式，但在生产环境中不可用（FlashAttention 不提供
 ``output_attentions``）。主要用于：
-1. 作为 H2OScoring 的精度上界参考
+1. 作为 PositionalScoring 的精度上界参考
 2. Calibration 实验的 reference baseline
 3. 论文中的 oracle/reference 对比
 """

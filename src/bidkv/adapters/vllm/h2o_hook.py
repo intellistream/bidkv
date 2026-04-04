@@ -1,7 +1,7 @@
 """H2O Decode Hook — vLLM decode step 后的 H2O scoring 更新回调。
 
 在每个 decode step 完成后，从 vLLM 的 model_runner_output 中
-提取注意力信息，更新 H2OScoring 的累积统计。
+提取注意力信息，更新 PositionalScoring 的累积统计。
 
 vLLM 的 FlashAttention 不暴露 output_attentions，因此使用代理信号：
 - 生成 token 的 position 作为 attend-to 频率的近似

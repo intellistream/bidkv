@@ -3,7 +3,7 @@
 **关键归因 baseline**：对比 Global-NoBid → BidKV 可揭示
 bid 接口（用户显式偏好）的增量价值。
 
-设计理由：Global-NoBid 与 BidKV 使用相同的 H2OScoring 评分和
+设计理由：Global-NoBid 与 BidKV 使用相同的 PositionalScoring 评分和
 相同的 utility-ratio 贪心算法，但 **系统自动推断 utility 并直接
 做出压缩决策**（不暴露 bid 接口给用户）。
 如果 BidKV > Global-NoBid，则证明用户显式 bid 比系统推断更有价值。
@@ -14,7 +14,7 @@ bid 接口（用户显式偏好）的增量价值。
 - 评分策略、compression_levels、delta_budget、贪心算法完全相同
 
 选择公式：
-- U_sys = r / (δ_H2O + ε)，其中 δ_H2O 由 H2OScoring 估算
+- U_sys = r / (δ_H2O + ε)，其中 δ_H2O 由 PositionalScoring 估算
 - 多级 compression levels：与 BidKV 相同 (0.2, 0.4, 0.6)
 - All options 混合按 U_sys 贪心选择，每 request 最多选 1 级
 """
@@ -25,14 +25,14 @@ from typing import Any
 
 from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
 from bidkv.protocol.bid import _UTILITY_EPSILON
-from bidkv.scoring import H2OScoring
+from bidkv.scoring import PositionalScoring
 
 
 class GlobalNoBidStrategy(BaselineStrategy):
     """Global-NoBid：系统推断 utility + 多级 greedy 选择（无 bid 接口）。
 
     流程：
-    1. 对每个候选请求，用 H2OScoring 评分
+    1. 对每个候选请求，用 PositionalScoring 评分
     2. 对每个 compression_level 估算 (tokens_freed, quality_delta)
     3. 计算系统推断 utility：U_sys = tokens_freed / (δ_H2O + ε)
     4. 将所有 (request, level) options 混合，按 U_sys 降序贪心选择
@@ -42,7 +42,7 @@ class GlobalNoBidStrategy(BaselineStrategy):
     Parameters
     ----------
     scoring:
-        H2OScoring 实例。若为 None，使用默认配置创建。
+        PositionalScoring 实例。若为 None，使用默认配置创建。
     delta_budget:
         质量损失上限（Σδ ≤ delta_budget）。默认 0.15。
     compression_levels:
@@ -52,11 +52,11 @@ class GlobalNoBidStrategy(BaselineStrategy):
     def __init__(
         self,
         *,
-        scoring: H2OScoring | None = None,
+        scoring: PositionalScoring | None = None,
         delta_budget: float = 0.15,
         compression_levels: tuple[float, ...] = (0.2, 0.4, 0.6),
     ) -> None:
-        self._scoring = scoring or H2OScoring()
+        self._scoring = scoring or PositionalScoring()
         self._delta_budget = delta_budget
         self._compression_levels = compression_levels
 
@@ -65,16 +65,15 @@ class GlobalNoBidStrategy(BaselineStrategy):
         return "global-nobid"
 
     @property
-    def scoring(self) -> H2OScoring:
-        """当前使用的 H2OScoring 实例。"""
+    def scoring(self) -> PositionalScoring:
+        """当前使用的 PositionalScoring 实例。"""
         return self._scoring
 
     @staticmethod
     def _completion_factor(req: RequestState) -> float:
         """Compute recompute-cost penalty for near-completion candidates.
 
-        Same logic as BidKVStrategy._completion_factor — keeps ablation clean
-        (the only difference is bid protocol vs direct greedy).
+        Quadratic ramp: 0% → 1.0×, 50% → 2.0×, 80% → 3.56×, 100% → 5.0×.
         """
         if req.max_output_tokens <= 0 or req.num_computed_tokens <= 0:
             return 1.0
@@ -101,8 +100,8 @@ class GlobalNoBidStrategy(BaselineStrategy):
         needed_tokens:
             需要释放的 token 数量。
         **kwargs:
-            可选 ``scoring_states``：dict[str, H2OScoring]，
-            每个请求独立的 H2OScoring 实例。
+            可选 ``scoring_states``：dict[str, PositionalScoring]，
+            每个请求独立的 PositionalScoring 实例。
             可选 ``delta_budget``：覆盖默认 delta_budget。
 
         Returns
@@ -113,7 +112,7 @@ class GlobalNoBidStrategy(BaselineStrategy):
         if needed_tokens <= 0 or not candidates:
             return []
 
-        scoring_states: dict[str, H2OScoring] = kwargs.get("scoring_states", {})
+        scoring_states: dict[str, PositionalScoring] = kwargs.get("scoring_states", {})
         delta_budget = kwargs.get("delta_budget", self._delta_budget)
 
         # 为每个 candidate × 每个 compression_level 生成 option

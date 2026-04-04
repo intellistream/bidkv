@@ -75,7 +75,7 @@ class BaselineRegistry:
     def create_default_registry(self) -> None:
         """注册所有内置 baseline（延迟导入以避免循环依赖）。"""
         from bidkv.baselines.bidkv_strategy import BidKVStrategy
-        from bidkv.baselines.h2o_style import H2OStyleStrategy
+        from bidkv.baselines.largest_first import LargestFirstStrategy
         from bidkv.baselines.preempt_evict import PreemptEvictStrategy
         from bidkv.baselines.preempt_evict_sjf import PreemptEvictSJFStrategy
         from bidkv.baselines.slack_aware import SlackAwareStrategy
@@ -86,7 +86,7 @@ class BaselineRegistry:
             PreemptEvictStrategy(),
             PreemptEvictSJFStrategy(),
             StaticRandomStrategy(),
-            H2OStyleStrategy(),
+            LargestFirstStrategy(),
             UniformStrategy(),
             SlackAwareStrategy(),
             BidKVStrategy(),

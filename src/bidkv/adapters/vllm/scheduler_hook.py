@@ -269,7 +269,7 @@ def _reorder_waiting_for_admission(scheduler: Any, adapter: VLLMAdapter) -> None
     │ preempt-evict     │ FCFS — no reorder (true vLLM default)       │
     │ preempt-evict-sjf │ SJF by prompt_tokens (LIFO eviction ablation)│
     │ static-random     │ SJF by prompt_tokens                        │
-    │ h2o-style         │ SJF by prompt_tokens                        │
+    │ largest-first     │ SJF by prompt_tokens                        │
     │ uniform           │ SJF by prompt_tokens                        │
     │ slack-aware       │ EDF by arrival_time (≈ FCFS under uniform SLO) │
     │ bidkv             │ SJF by prompt_tokens (same as other SJF)    │
@@ -310,7 +310,7 @@ def _reorder_waiting_for_admission(scheduler: Any, adapter: VLLMAdapter) -> None
             waiting.append(req)
 
     else:
-        # All SJF strategies (preempt-evict-sjf, static-random, h2o-style,
+        # All SJF strategies (preempt-evict-sjf, static-random, largest-first,
         # uniform, bidkv): SJF by prompt_tokens.
         # max_tokens is a standard API param accessible to all — NOT a
         # bid signal — so admission uses prompt_tokens only.
@@ -334,7 +334,7 @@ def _reorder_running_for_preemption(scheduler: Any, adapter: VLLMAdapter) -> Non
     │ preempt-evict     │ NO reorder — pure vLLM default (LIFO)       │
     │ preempt-evict-sjf │ NO reorder — LIFO eviction (SJF ablation)   │
     │ static-random     │ select_victims(): random victim selection    │
-    │ h2o-style         │ select_victims(): attention-importance based │
+    │ largest-first     │ select_victims(): capacity-greedy eviction   │
     │ uniform           │ select_victims(): equal treatment            │
     │ slack-aware       │ select_victims(): SLO-slack based            │
     │ bidkv             │ select_victims(): bid-informed priority      │
@@ -356,7 +356,7 @@ def _reorder_running_for_preemption(scheduler: Any, adapter: VLLMAdapter) -> Non
     if running is None or len(running) <= 1:
         return
 
-    # BidKV v8: pressure-gated quality-aware reorder.
+    # BidKV: pressure-gated quality-aware reorder.
     #
     # Below 95% KV: NO reorder — pure LIFO (vLLM default). LIFO naturally
     #   provides excellent p95 by evicting the newest request (least work
@@ -364,13 +364,12 @@ def _reorder_running_for_preemption(scheduler: Any, adapter: VLLMAdapter) -> Non
     # Above 95% KV: Quality-aware reorder from cached priority influences
     #   native preemption victim selection. BidKV's U = r/(δ+ε) scoring
     #   puts the most efficient victim at the end for running.pop().
+    #
+    # U-score naturally handles long-context recompute concerns:
+    #   - completion factor penalizes near-done requests (避免驱逐快完成的)
+    #   - anti-starvation (0.3×preemptions) prevents cascading evictions
+    #   - freed dominates ordering → efficient KV reclamation
     if strategy_name == "bidkv" and len(running) >= 2:
-        total_prompt = sum(getattr(r, "num_prompt_tokens", 0) for r in running)
-        avg_prompt = total_prompt / len(running)
-        # Long-context guard: LIFO is safer when recompute costs are high.
-        if avg_prompt > 500:
-            return
-
         # Pressure gate: below 95%, LIFO is optimal.
         kv_mgr = getattr(scheduler, "kv_cache_manager", None)
         if kv_mgr is not None:
@@ -516,14 +515,6 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
     if strategy_name in ("preempt-evict", "preempt-evict-sjf"):
         return
 
-    # BidKV: disable proactive preemption — rely solely on running
-    # reorder to influence native preemption victim selection.
-    # Each extra eviction triggers full prompt recompute in Mode A;
-    # empirical evidence shows 0 proactive evictions gives the best
-    # balanced p95/p99 profile (v8 Pareto-dominates at rates 2.0/3.8).
-    if strategy_name == "bidkv":
-        return
-
     # Find victim from cached priority (lowest priority = most expendable)
     cached = getattr(adapter, "_cached_preempt_priority", None)
     if not cached:
@@ -549,24 +540,6 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
     victim_id = getattr(best_victim_req, "request_id", "")
     freed_estimate = getattr(best_victim_req, "num_computed_tokens", 0)
 
-    # BidKV-specific: recompute cost-benefit gate.
-    # In Mode A, eviction triggers full recompute of the victim's prompt.
-    # For requests where recompute cost exceeds scheduling benefit, skip.
-    # This is adaptive: uses the actual recompute cost of the chosen victim.
-    if strategy_name == "bidkv":
-        victim_prompt = getattr(best_victim_req, "num_prompt_tokens", 0)
-        victim_computed = getattr(best_victim_req, "num_computed_tokens", 0)
-        victim_output = max(0, victim_computed - victim_prompt)
-        victim_max_out = _get_max_tokens_estimate(best_victim_req)
-        victim_remaining = max(1, victim_max_out - victim_output)
-        # Recompute cost = victim_prompt (must redo entire prefill).
-        # Benefit = victim_remaining (output work saved by waiting request).
-        # Gate: only evict if benefit > cost, i.e., remaining > prompt.
-        # For long-context (prompt=2000, remaining=200): cost >> benefit → skip.
-        # For short-context (prompt=100, remaining=200): benefit > cost → evict.
-        if victim_remaining < victim_prompt:
-            return
-
     # Execute native preemption via vLLM's _preempt_request
     preempt_fn = getattr(scheduler, "_preempt_request", None)
     if preempt_fn is None:
@@ -589,7 +562,7 @@ def _proactive_preempt(scheduler: Any, adapter: VLLMAdapter) -> None:
         prev_ids.discard(victim_id)
 
     scheduler._bidkv_last_proactive = now
-    adapter._metrics.record_compression(victim_id, freed_estimate)
+    adapter._metrics.record_eviction(victim_id, freed_estimate)
     _diag(
         f"proactive PREEMPT: strategy={strategy_name} "
         f"victim={victim_id} usage={usage:.2f} freed~{freed_estimate}"
@@ -786,7 +759,7 @@ def _proactive_srpt(scheduler: Any, adapter: VLLMAdapter) -> None:
         prev_ids.discard(victim_id)
 
     scheduler._bidkv_last_srpt = now
-    adapter._metrics.record_compression(victim_id, worst_remaining)
+    adapter._metrics.record_eviction(victim_id, worst_remaining)
     _diag(
         f"SRPT preempt: strategy={strategy_name} victim={victim_id} "
         f"remaining={worst_remaining} waiting_cost={best_waiting_cost} "
@@ -908,7 +881,7 @@ def _patched_update_from_output(
     # on strategies that don't benefit from cumulative attention data).
     # Note: BidKV Mode A uses completion-ratio δ, not H2O token scores.
     # Sampled at 20% (every 5th step) to reduce CPU overhead.
-    _H2O_STRATEGIES = ("h2o-style",)
+    _H2O_STRATEGIES = ("largest-first",)
     if adapter._experiment_strategy_name in _H2O_STRATEGIES:
         h2o_counter = getattr(scheduler, "_bidkv_h2o_counter", 0) + 1
         scheduler._bidkv_h2o_counter = h2o_counter

@@ -88,16 +88,16 @@ class BaseAdapterMetrics:
     """
 
     def __init__(self) -> None:
-        self.total_compressions: int = 0
+        self.total_evictions: int = 0
         self.total_tokens_freed: int = 0
         self.total_pressure_events: int = 0
         self.total_requests_completed: int = 0
         self.total_decode_steps: int = 0
         self.kill_switch_activations: int = 0
 
-    def record_compression(self, request_id: str, tokens_freed: int) -> None:  # noqa: ARG002
+    def record_eviction(self, request_id: str, tokens_freed: int) -> None:  # noqa: ARG002
         if tokens_freed > 0:
-            self.total_compressions += 1
+            self.total_evictions += 1
             self.total_tokens_freed += tokens_freed
 
     def record_pressure_event(self) -> None:
@@ -115,7 +115,7 @@ class BaseAdapterMetrics:
     def as_dict(self) -> dict[str, int]:
         """返回所有指标的字典形式。"""
         return {
-            "total_compressions": self.total_compressions,
+            "total_evictions": self.total_evictions,
             "total_tokens_freed": self.total_tokens_freed,
             "total_pressure_events": self.total_pressure_events,
             "total_requests_completed": self.total_requests_completed,

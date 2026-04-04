@@ -5,7 +5,7 @@
 
 评分三级分类
 ------------
-- **Practical Scoring**：H2OScoring — 生产部署中实际使用的评分代理
+- **Practical Scoring**：PositionalScoring — 生产部署中实际使用的评分代理
 - **Reference Scoring**：AttentionWeightScoring — 精度上界参考（需 output_attentions）
 - **Auxiliary Scoring**：UniformScoring / RandomScoring — 消融实验用基线
 

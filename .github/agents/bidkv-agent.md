@@ -64,11 +64,11 @@ src/bidkv/
 ├── baselines/               # 7 策略（6 baseline + BidKV）
 │   ├── base.py              # BaselineStrategy ABC, RequestState, BaselineContext
 │   ├── registry.py          # BaselineRegistry（名称→策略实例）
-│   ├── preempt_evict.py     # 1. vLLM 原生 baseline
-│   ├── static_random.py     # 2. 随机压缩
-│   ├── h2o_style.py         # 3. attention-based heuristic
-│   ├── uniform.py           # 4. 均等压缩
-│   ├── global_nobid.py      # 5. 系统推断（无 bid）
+│   ├── preempt_evict.py     # 1. vLLM 原生 baseline (FCFS+LIFO)
+│   ├── preempt_evict_sjf.py # 2. PE + SJF admission
+│   ├── static_random.py     # 3. 随机驱逐
+│   ├── h2o_style.py         # 4. attention-based heuristic
+│   ├── uniform.py           # 5. 均等驱逐
 │   ├── slack_aware.py       # 6. SLO-deadline aware
 │   └── bidkv_strategy.py    # 7. BidKV 完整系统
 ├── adapters/                # 框架适配器
@@ -154,13 +154,13 @@ BidKV 不修改这个执行路径，只控制“谁被选中”。
 
 所有 7 个策略的调度分化：
 
-| 层面               | preempt-evict | slack-aware | random/h2o/uniform/nobid | bidkv                          |
-| ------------------ | ------------- | ----------- | ------------------------ | ------------------------------ |
-| Waiting 排序       | FCFS (无排序) | EDF (到达序) | SJF (prompt_tokens)      | SJF (prompt_tokens)            |
-| Running 排序       | LIFO (无排序) | cached prio | cached prio              | cached prio                    |
-| select_victims()   | N/A           | slack-based | 各自启发式               | **U = r/(δ+ε)** 质量感知      |
-| SRPT 主动驱逐      | ❌            | ❌          | ✅ (同等估算)            | ✅ (同等估算)                  |
-| Proactive preempt  | ❌            | ✅          | ✅                       | ✅                             |
+| 层面               | PE            | PE-SJF        | Slack       | Random/H2O/Uniform | BidKV                          |
+| ------------------ | ------------- | ------------- | ----------- | ------------------- | ------------------------------ |
+| Waiting 排序       | FCFS (无排序) | SJF           | EDF (到达序) | SJF (prompt_tokens) | SJF (prompt_tokens)            |
+| Running 排序       | LIFO (无排序) | LIFO (无排序) | cached prio | cached prio         | 95% KV 门控 + avg_prompt≤500  |
+| select_victims()   | N/A           | N/A           | slack-based | 各自启发式          | **U = r/(δ+ε)** 质量感知      |
+| SRPT 主动驱逐      | ❌            | ❌            | ❌          | ✅ (同等估算)       | ❌ (recompute 成本过高)        |
+| Proactive preempt  | ❌            | ❌            | ✅          | ✅                  | ✅                             |
 
 BidKV 的唯一分化点：`select_victims()` 中使用完整 scoring→bid→pool→solver
 管线计算 **U = tokens_freed / (quality_delta + ε)**，实现质量感知的 preemption 排序。
@@ -353,6 +353,234 @@ conda run -n sagellm python -m ruff check . && conda run -n sagellm python -m ru
 | Gate-B         | 2026-03-31   | vLLM Mode A 全量 + SGLang 全量 目标         |
 | Phase D        | 04-01~08     | #039 论文写作冲刺                        |
 | SC 2026 投稿   | 2026-04-10   | 论文截止                                     |
+
+## 实验结果 JSON 数据格式（mixed 与 long_context 通用）
+
+**⚠️ 分析实验数据时必须使用以下正确字段名，不要凭记忆猜测。**
+**⚠️ 所有字段名已于 2026-04-03 通过实际数据审计确认，以此为准。**
+
+### 1. 文件命名与目录
+
+```
+results/{result_dir}/{strategy}__{workload}__rate{rate}__r{run_index}.json
+# 示例：bidkv__mixed__rate3.8__r0.json
+# 示例：h2o-style__long_context__rate0.5__r2.json
+```
+
+### 2. 顶层结构（13 个键）
+
+```python
+d = json.load(open(result_file))
+
+# ✅ 核心数据
+d['request_results']      # list[dict] — 每个请求的详细结果
+d['adapter_metrics']      # dict — BidKV adapter 运行指标（驱逐统计等）
+d['summary']              # dict — 预计算的汇总指标
+
+# ✅ 运行元数据
+d['duration_s']           # float — 运行时长（秒）
+d['strategy']             # str — 策略名 ("bidkv", "h2o-style", etc.)
+d['workload']             # str — 工作负载名 ("mixed", "long_context")
+d['request_rate']         # float — 请求速率 (req/s)
+d['run_index']            # int — 运行序号 (0, 1, 2)
+d['run_label']            # str — 完整运行标签 ("bidkv__mixed__rate2.0__r0")
+d['start_time']           # float — Unix 时间戳
+d['end_time']             # float — Unix 时间戳
+d['server_config']        # dict — 服务端配置 {'run_status': 'completed'}
+d['candidate_snapshots']  # list — 通常为空列表 []
+
+# ❌ 不存在的字段名（常见错误）：
+# d['requests']           — 不存在，用 d['request_results']
+# d['duration']           — 不存在，用 d['duration_s']
+# d['rate']               — 不存在，用 d['request_rate']
+```
+
+### 3. request_results 单个请求字段（10 个键）
+
+```python
+r = d['request_results'][0]
+
+r['request_id']           # str — 请求 ID ("mixed-0000", "long-0042")
+r['ttft_ms']              # float — TTFT（毫秒，已经是 ms 不需要 ×1000）
+r['total_latency_ms']     # float — 端到端延迟（毫秒）
+r['completion_tokens']    # int — 生成 token 数
+r['prompt_tokens']        # int — ⚠️ 当前实验中始终为 0（采集代码未记录）
+r['error']                # str — 成功时为空字符串 ''（不是 None）
+r['submit_time']          # float — 提交时间戳（monotonic clock）
+r['first_token_time']     # float — 首 token 时间戳（monotonic clock）
+r['finish_time']          # float — 完成时间戳（monotonic clock）
+r['generated_text']       # str — 生成的文本内容
+
+# ❌ 不存在的字段名：
+# r['ttft']               — 不存在，用 r['ttft_ms']
+# r['tpot']               — 不存在，必须手动计算
+# r['latency']            — 不存在，用 r['total_latency_ms']
+# r['tokens']             — 不存在，用 r['completion_tokens']
+```
+
+### 4. adapter_metrics 字段（⚠️ 字段名因策略/运行批次不同而有差异）
+
+```python
+am = d['adapter_metrics']
+
+# ✅ 所有策略共有
+am['total_tokens_freed']          # int — 总释放 token 数
+am['total_pressure_events']       # int — KV 压力事件数
+am['total_requests_completed']    # int — 完成请求数
+am['total_decode_steps']          # int — decode 步数
+am['kill_switch_activations']     # int — kill switch 触发次数
+am['preemptions_avoided']         # int — 避免的 preemption 次数
+
+# ⚠️ 驱逐次数字段名不一致（历史原因）：
+# - 部分旧批次文件使用 'total_compressions'（如 mixed 的 bidkv/PE/PE-SJF/h2o-style）
+# - 新批次文件使用 'total_evictions'（如 long_context 所有策略、mixed 的 slack/random/uniform）
+# 安全读取方式：
+evictions = am.get('total_evictions', am.get('total_compressions', 0))
+
+# ❌ 不存在的字段名（常见错误）：
+# am['evictions_total']            — 不存在
+# am['evictions']                  — 不存在
+# am['pressure_events']            — 不存在，用 am['total_pressure_events']
+# am['priority_cache_refreshes']   — 不存在，此指标未记录到结果文件中
+```
+
+### 5. summary 预计算字段（11 个键）
+
+```python
+s = d['summary']
+s['throughput_rps']                  # float — 吞吐量 (req/s)
+s['successful_requests']             # int — 成功请求数
+s['failed_requests']                 # int — 失败请求数
+s['total_requests']                  # int — 总请求数
+s['ttft_ms_p50']                     # float — TTFT p50 (ms)
+s['ttft_ms_p99']                     # float — TTFT p99 (ms)
+s['tpot_ms_p50']                     # float — TPOT p50 (ms)
+s['tpot_ms_p99']                     # float — TPOT p99 (ms)
+s['e2e_latency_ms_p50']              # float — 端到端延迟 p50 (ms)
+s['e2e_latency_ms_p99']              # float — 端到端延迟 p99 (ms)
+s['normalized_latency_ms_per_token'] # float — 归一化延迟
+
+# ⚠️ summary 中没有 p95！p95 必须从 request_results 原始数据计算。
+# ⚠️ summary 中没有 SLO attainment！必须从 request_results 原始数据计算。
+```
+
+### 6. 标准数据分析代码模板
+
+```python
+import json, os, statistics
+
+def load_run(filepath):
+    """加载单个实验结果文件，返回标准化的指标字典。"""
+    d = json.load(open(filepath))
+    
+    # 过滤成功请求（error 是空字符串 '' 不是 None）
+    ok = [r for r in d['request_results'] if not r.get('error')]
+    
+    # TTFT 列表
+    ttft_list = [r['ttft_ms'] for r in ok if r['ttft_ms'] is not None]
+    
+    # TPOT 列表（必须手动计算）
+    tpot_list = []
+    for r in ok:
+        if (r.get('completion_tokens', 0) > 1 
+                and r.get('ttft_ms') is not None 
+                and r.get('total_latency_ms') is not None):
+            tpot = (r['total_latency_ms'] - r['ttft_ms']) / (r['completion_tokens'] - 1)
+            tpot_list.append(tpot)
+    
+    # 排序后取百分位
+    ttft_list.sort()
+    tpot_list.sort()
+    
+    def percentile(data, p):
+        if not data:
+            return float('nan')
+        idx = int(len(data) * p / 100)
+        return data[min(idx, len(data) - 1)]
+    
+    # SLO attainment（mixed=300ms, long_context=2000ms）
+    slo_threshold = 2000.0 if 'long' in d.get('workload', '') else 300.0
+    slo_count = sum(1 for t in ttft_list if t <= slo_threshold)
+    slo_pct = slo_count / len(ttft_list) * 100 if ttft_list else 0
+    
+    # Throughput
+    throughput = d['summary']['throughput_rps']
+    
+    # 驱逐统计（兼容新旧字段名）
+    am = d.get('adapter_metrics', {})
+    evictions = am.get('total_evictions', am.get('total_compressions', 0))
+    freed = am.get('total_tokens_freed', 0)
+    
+    return {
+        'throughput': throughput,
+        'slo_pct': slo_pct,
+        'ttft_p50': percentile(ttft_list, 50),
+        'ttft_p95': percentile(ttft_list, 95),
+        'ttft_p99': percentile(ttft_list, 99),
+        'tpot_p50': percentile(tpot_list, 50),
+        'tpot_p95': percentile(tpot_list, 95),
+        'tpot_p99': percentile(tpot_list, 99),
+        'ok_count': len(ok),
+        'total_count': len(d['request_results']),
+        'evictions': evictions,
+        'tokens_freed': freed,
+        'strategy': d.get('strategy', ''),
+        'workload': d.get('workload', ''),
+        'rate': d.get('request_rate', 0),
+    }
+
+def load_all_runs(result_dir):
+    """加载目录下所有结果文件，按 (strategy, rate) 分组。"""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for fn in sorted(os.listdir(result_dir)):
+        if not fn.endswith('.json') or fn.startswith('candidate'):
+            continue
+        filepath = os.path.join(result_dir, fn)
+        m = load_run(filepath)
+        groups[(m['strategy'], m['rate'])].append(m)
+    return groups
+
+def cross_rate_average(groups):
+    """计算每个策略的跨速率平均值。"""
+    from collections import defaultdict
+    strat_metrics = defaultdict(lambda: defaultdict(list))
+    for (strat, rate), runs in groups.items():
+        for m in runs:
+            for k in ['throughput', 'slo_pct', 'ttft_p95', 'tpot_p95', 'evictions', 'tokens_freed']:
+                strat_metrics[strat][k].append(m[k])
+    
+    result = {}
+    for strat, metrics in strat_metrics.items():
+        result[strat] = {k: statistics.mean(v) for k, v in metrics.items()}
+    return result
+```
+
+### 7. 已知数据陷阱（必读）
+
+| 陷阱 | 说明 | 正确做法 |
+|------|------|---------|
+| `prompt_tokens` 始终为 0 | 实验采集代码未正确记录 prompt token 数 | 不要使用此字段做分析 |
+| adapter_metrics 驱逐字段名不一致 | 旧批次用 `total_compressions`，新批次用 `total_evictions` | 用 `am.get('total_evictions', am.get('total_compressions', 0))` |
+| summary 无 p95 | summary 只有 p50 和 p99 | p95 必须从 request_results 原始数据计算 |
+| summary 无 SLO attainment | SLO 未预计算 | 必须从 ttft_ms 原始数据按阈值计算 |
+| error 字段是空字符串 | 成功时 error='' 而不是 None | 用 `if not r.get('error')` 而非 `r.get('error') is None` |
+| mixed bidkv 驱逐数为 0 | mixed 负载下 BidKV 未触发 proactive preempt（KV 压力不足） | 正常现象，不是 bug。只有 long_context 才有显著驱逐 |
+| PE/PE-SJF 驱逐数始终为 0 | 这两个策略禁用了 proactive preempt，只靠 vLLM 原生 LIFO 驱逐 | 正常设计。adapter_metrics 只记录 BidKV 主动发起的驱逐 |
+
+### 8. 驱逐数据参考值（2026-04-03 审计确认）
+
+| 策略 | Mixed Avg Evictions | Mixed Avg Freed | LC Avg Evictions | LC Avg Freed |
+|------|--------------------:|----------------:|-----------------:|-------------:|
+| bidkv | 0 | 0 | 108 | 259,122 |
+| h2o-style (largest-first) | 0† | 59,916† | 117 | 287,235 |
+| static-random | 72 | 18,957 | 100 | 208,620 |
+| slack-aware | 27 | 16,327 | — | — |
+| uniform | 73 | 18,048 | — | — |
+| preempt-evict | 0 | 0 | 0 | 0 |
+| preempt-evict-sjf | 0 | 0 | 0 | 0 |
+
+†h2o-style mixed：`total_evictions` 字段不存在，但 `total_compressions`>0 且 `total_tokens_freed`>0。
 
 ## 实验硬件
 

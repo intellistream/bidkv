@@ -14,7 +14,7 @@ from bidkv.adapters.vllm.adapter import AdapterMetrics, VLLMAdapter
 from bidkv.config import BidKVConfig
 from bidkv.pool import BidPoolManager
 from bidkv.pressure import PressureConfig, PressureDetector
-from bidkv.scoring import H2OScoring, UniformScoring
+from bidkv.scoring import PositionalScoring, UniformScoring
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
 # ---------------------------------------------------------------------------
@@ -23,9 +23,9 @@ from bidkv.solver import GreedyBidSolver, SolverConfig
 
 
 @pytest.fixture
-def h2o_scoring() -> H2OScoring:
-    """H2OScoring 实例（默认参数）。"""
-    return H2OScoring()
+def positional_scoring() -> PositionalScoring:
+    """PositionalScoring 实例（默认参数）。"""
+    return PositionalScoring()
 
 
 @pytest.fixture
@@ -47,20 +47,24 @@ def inactive_config() -> BidKVConfig:
 
 
 @pytest.fixture
-def adapter_active(active_config: BidKVConfig, h2o_scoring: H2OScoring) -> VLLMAdapter:
+def adapter_active(
+    active_config: BidKVConfig, positional_scoring: PositionalScoring,
+) -> VLLMAdapter:
     """启用状态的 VLLMAdapter（无 scheduler）。"""
     return VLLMAdapter(
         config=active_config,
-        scoring=h2o_scoring,
+        scoring=positional_scoring,
         pressure_config=PressureConfig(enabled=True, threshold_pct=0.85),
         solver_config=SolverConfig(enabled=True, delta_budget=0.15),
     )
 
 
 @pytest.fixture
-def adapter_inactive(inactive_config: BidKVConfig, h2o_scoring: H2OScoring) -> VLLMAdapter:
+def adapter_inactive(
+    inactive_config: BidKVConfig, positional_scoring: PositionalScoring,
+) -> VLLMAdapter:
     """未启用状态的 VLLMAdapter。"""
-    return VLLMAdapter(config=inactive_config, scoring=h2o_scoring)
+    return VLLMAdapter(config=inactive_config, scoring=positional_scoring)
 
 
 # ---------------------------------------------------------------------------
@@ -72,26 +76,26 @@ class TestVLLMAdapterConstruction:
     """VLLMAdapter 构造函数测试。"""
 
     def test_default_config_creates_inactive_adapter(
-        self, inactive_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, inactive_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
-        adapter = VLLMAdapter(config=inactive_config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=inactive_config, scoring=positional_scoring)
         assert not adapter.config.is_active
         assert not adapter.installed
 
     def test_active_config_creates_active_adapter(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
-        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=active_config, scoring=positional_scoring)
         assert adapter.config.is_active
         assert not adapter.installed
 
     def test_custom_compression_levels(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         levels = [0.1, 0.3, 0.5]
         adapter = VLLMAdapter(
             config=active_config,
-            scoring=h2o_scoring,
+            scoring=positional_scoring,
             compression_levels=levels,
         )
         assert adapter._compression_levels == tuple(levels)
@@ -239,10 +243,10 @@ class TestInstallHooks:
             adapter_active.install()
 
     def test_install_inactive_skips(
-        self, inactive_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, inactive_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """Feature OFF 时 install 不注入。"""
-        adapter = VLLMAdapter(config=inactive_config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=inactive_config, scoring=positional_scoring)
         adapter.install()  # 不报错，静默跳过
         assert not adapter.installed
 
@@ -258,7 +262,7 @@ class TestH2ODecodeCallback:
     def test_on_decode_step_updates_scoring(self, adapter_active: VLLMAdapter) -> None:
         """verify on_decode_step 调用 scoring.update_from_decode_step。"""
         scoring = adapter_active.scoring
-        assert isinstance(scoring, H2OScoring)
+        assert isinstance(scoring, PositionalScoring)
         assert scoring.decode_steps == 0
 
         adapter_active.on_decode_step("req-1", [0.1, 0.5, 0.3, 0.8])
@@ -268,7 +272,7 @@ class TestH2ODecodeCallback:
     def test_on_decode_step_inactive_is_noop(self, adapter_inactive: VLLMAdapter) -> None:
         """Feature OFF 时 on_decode_step 不更新。"""
         scoring = adapter_inactive.scoring
-        assert isinstance(scoring, H2OScoring)
+        assert isinstance(scoring, PositionalScoring)
 
         adapter_inactive.on_decode_step("req-1", [0.1, 0.5])
         assert scoring.decode_steps == 0
@@ -284,27 +288,27 @@ class TestAdapterMetrics:
 
     def test_initial_metrics(self) -> None:
         m = AdapterMetrics()
-        assert m.total_compressions == 0
+        assert m.total_evictions == 0
         assert m.total_tokens_freed == 0
         assert m.total_pressure_events == 0
 
-    def test_record_compression(self) -> None:
+    def test_record_eviction(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 100)
-        assert m.total_compressions == 1
+        m.record_eviction("req-1", 100)
+        assert m.total_evictions == 1
         assert m.total_tokens_freed == 100
 
-    def test_record_compression_zero_is_noop(self) -> None:
+    def test_record_eviction_zero_is_noop(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 0)
-        assert m.total_compressions == 0
+        m.record_eviction("req-1", 0)
+        assert m.total_evictions == 0
 
     def test_as_dict(self) -> None:
         m = AdapterMetrics()
-        m.record_compression("req-1", 50)
+        m.record_eviction("req-1", 50)
         m.record_pressure_event()
         d = m.as_dict()
-        assert d["total_compressions"] == 1
+        assert d["total_evictions"] == 1
         assert d["total_tokens_freed"] == 50
         assert d["total_pressure_events"] == 1
 
@@ -584,12 +588,12 @@ class TestCompressionExecution:
     """压缩执行路径测试（tail truncation）。"""
 
     def test_no_truncation_support_returns_zero(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """无 truncation_support 时返回 0（不再 fallback 到 recompute）。"""
         scheduler = _FakeScheduler()
         scheduler.add_running_request("req-1")
-        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter = VLLMAdapter(config=active_config, scoring=positional_scoring, scheduler=scheduler)
         adapter.track_request("req-1", list(range(100)))
 
         freed = adapter.execute_compression("req-1", 50)
@@ -598,31 +602,31 @@ class TestCompressionExecution:
         assert scheduler.preempted_requests == []
 
     def test_no_scheduler_returns_zero(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """scheduler=None 时返回 0。"""
-        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=active_config, scoring=positional_scoring)
         adapter.track_request("req-1", list(range(50)))
 
         freed = adapter.execute_compression("req-1", 50)
         assert freed == 0
 
     def test_untracked_request_returns_zero(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """没有追踪的 token 时返回 0。"""
         scheduler = _FakeScheduler()
-        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter = VLLMAdapter(config=active_config, scoring=positional_scoring, scheduler=scheduler)
 
         freed = adapter.execute_compression("req-unknown", 50)
         assert freed == 0
 
     def test_empty_tokens_returns_zero(
-        self, active_config: BidKVConfig, h2o_scoring: H2OScoring
+        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
     ) -> None:
         """追踪的 token 列表为空时返回 0。"""
         scheduler = _FakeScheduler()
-        adapter = VLLMAdapter(config=active_config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter = VLLMAdapter(config=active_config, scoring=positional_scoring, scheduler=scheduler)
         adapter.track_request("req-1", [])
 
         freed = adapter.execute_compression("req-1", 50)
@@ -637,7 +641,9 @@ class TestCompressionExecution:
 class TestTruncationRouting:
     """Tail truncation 路由测试。"""
 
-    def test_truncation_routes_to_block_truncation(self, h2o_scoring: H2OScoring) -> None:
+    def test_truncation_routes_to_block_truncation(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """execute_compression 路由到 _execute_tail_truncation (block truncation)."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
@@ -645,7 +651,7 @@ class TestTruncationRouting:
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         req = scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = VLLMAdapter(config=config, scoring=h2o_scoring, scheduler=scheduler)
+        adapter = VLLMAdapter(config=config, scoring=positional_scoring, scheduler=scheduler)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 32)
@@ -656,10 +662,12 @@ class TestTruncationRouting:
         # num_computed_tokens updated to new boundary
         assert req.num_computed_tokens == 48  # 3 remaining blocks × 16
 
-    def test_kill_switch_config_stable(self, h2o_scoring: H2OScoring) -> None:
+    def test_kill_switch_config_stable(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """kill switch 激活/解除不破坏 config。"""
         config = BidKVConfig(enabled=True, kill_switch=False)
-        adapter = VLLMAdapter(config=config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=config, scoring=positional_scoring)
 
         adapter.activate_kill_switch()
         assert adapter.config.kill_switch is True
@@ -776,36 +784,40 @@ class TestTailTruncation:
     def _make_adapter(
         self,
         scheduler: _FakeScheduler,
-        h2o_scoring: H2OScoring,
+        positional_scoring: PositionalScoring,
     ) -> VLLMAdapter:
         config = BidKVConfig(enabled=True, kill_switch=False)
-        return VLLMAdapter(config=config, scoring=h2o_scoring, scheduler=scheduler)
+        return VLLMAdapter(config=config, scoring=positional_scoring, scheduler=scheduler)
 
-    def test_basic_truncation_with_support(self, h2o_scoring: H2OScoring) -> None:
+    def test_basic_truncation_with_support(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """Block-level truncation frees blocks, tracks metrics."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 32)
 
         assert freed == 32  # 2 blocks × 16 tokens
         assert scheduler.preempted_requests == []  # NOT preempted
-        assert adapter.metrics.total_compressions == 1
+        assert adapter.metrics.total_evictions == 1
         assert adapter.metrics.total_tokens_freed == 32
 
-    def test_block_truncation_frees_tail_blocks(self, h2o_scoring: H2OScoring) -> None:
+    def test_block_truncation_frees_tail_blocks(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """Tail blocks freed, request stays running."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         req = scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 32)  # 2 blocks
@@ -815,14 +827,16 @@ class TestTailTruncation:
         assert req.num_computed_tokens == 48  # 3 remaining blocks × 16
         assert scheduler.preempted_requests == []  # NOT preempted
 
-    def test_truncation_capped_at_available_blocks(self, h2o_scoring: H2OScoring) -> None:
+    def test_truncation_capped_at_available_blocks(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """target_tokens > total → frees max blocks (keeps at least 1)."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         req = scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 1000)  # huge target
@@ -832,7 +846,9 @@ class TestTailTruncation:
         assert req.num_computed_tokens == 16  # 1 remaining block × 16
         assert scheduler.preempted_requests == []  # NOT preempted
 
-    def test_no_truncation_support_returns_zero(self, h2o_scoring: H2OScoring) -> None:
+    def test_no_truncation_support_returns_zero(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """No truncation_support installed → returns 0."""
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         req = scheduler.add_running_request("req-1")
@@ -840,7 +856,7 @@ class TestTailTruncation:
         req.num_prompt_tokens = 80
         req._output_token_ids = []
         req._all_token_ids = list(range(80))
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 32)
@@ -848,14 +864,16 @@ class TestTailTruncation:
         assert freed == 0
         assert scheduler.preempted_requests == []
 
-    def test_tracked_tokens_truncated_after_compression(self, h2o_scoring: H2OScoring) -> None:
+    def test_tracked_tokens_truncated_after_compression(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """After truncation, tracked tokens shortened to new boundary."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         adapter.execute_compression("req-1", 32)
@@ -866,33 +884,39 @@ class TestTailTruncation:
         tracked = adapter._request_tokens["req-1"]
         assert len(tracked) == 48
 
-    def test_truncation_no_scheduler_returns_zero(self, h2o_scoring: H2OScoring) -> None:
+    def test_truncation_no_scheduler_returns_zero(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """scheduler=None 时返回 0。"""
         config = BidKVConfig(enabled=True, kill_switch=False)
-        adapter = VLLMAdapter(config=config, scoring=h2o_scoring)
+        adapter = VLLMAdapter(config=config, scoring=positional_scoring)
         adapter.track_request("req-1", list(range(50)))
 
         freed = adapter.execute_compression("req-1", 20)
         assert freed == 0
 
-    def test_plain_scheduler_no_kv_returns_zero(self, h2o_scoring: H2OScoring) -> None:
+    def test_plain_scheduler_no_kv_returns_zero(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """Plain scheduler without kv_cache_manager returns 0."""
         scheduler = _FakeScheduler()  # no kv_cache_manager
         scheduler.add_running_request("req-1")
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(60)))
 
         freed = adapter.execute_compression("req-1", 20)
         assert freed == 0
 
-    def test_partial_block_truncation(self, h2o_scoring: H2OScoring) -> None:
+    def test_partial_block_truncation(self,
+        positional_scoring: PositionalScoring,
+    ) -> None:
         """Truncate fewer tokens than output — rounds up to block boundary."""
         from bidkv.adapters.vllm.truncation_hook import install_truncation_support
 
         scheduler = _FakeSchedulerWithKV(block_size=16, num_blocks_per_request=5)
         req = scheduler.add_running_request("req-1")
         install_truncation_support(scheduler.kv_cache_manager)
-        adapter = self._make_adapter(scheduler, h2o_scoring)
+        adapter = self._make_adapter(scheduler, positional_scoring)
         adapter.track_request("req-1", list(range(80)))
 
         freed = adapter.execute_compression("req-1", 10)  # <1 block, rounds up to 1

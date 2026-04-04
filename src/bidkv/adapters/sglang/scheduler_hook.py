@@ -563,7 +563,7 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
         return
 
     scheduler._bidkv_last_srpt = now
-    adapter._metrics.record_compression(victim_id, worst_remaining)
+    adapter._metrics.record_eviction(victim_id, worst_remaining)
     _diag(
         f"SRPT preempt: strategy={strategy_name} victim={victim_id} "
         f"remaining={worst_remaining} waiting_cost={best_waiting_cost} "

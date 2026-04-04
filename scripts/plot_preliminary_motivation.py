@@ -34,10 +34,9 @@ Output:
 """
 
 from __future__ import annotations
+
 import json
-import math
 import pathlib
-import random
 import sys
 
 # ---------------------------------------------------------------------------
@@ -45,6 +44,7 @@ import sys
 # ---------------------------------------------------------------------------
 try:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
@@ -91,8 +91,8 @@ print(f"  {len(requests)} requests, rate={request_rate} req/s")
 #                (500 tok/s prefill, 40 tok/s decode on A6000 8B bf16)
 # ---------------------------------------------------------------------------
 
-PREFILL_TPS = 500   # tokens/s estimated prefill throughput
-DECODE_TPS  = 40    # tokens/s estimated decode throughput
+PREFILL_TPS = 500  # tokens/s estimated prefill throughput
+DECODE_TPS = 40  # tokens/s estimated decode throughput
 
 events: list[dict] = []
 for req in requests:
@@ -100,14 +100,16 @@ for req in requests:
     prompt_tok = int(req["metadata"]["actual_prompt_tokens"])
     max_tok = req["max_tokens"]
     duration_s = prompt_tok / PREFILL_TPS + max_tok / DECODE_TPS
-    events.append({
-        "request_id": req["request_id"],
-        "arrival_s": arrival_s,
-        "end_s": arrival_s + duration_s,
-        "prompt_tokens": prompt_tok,
-        "max_tokens": max_tok,
-        "duration_s": duration_s,
-    })
+    events.append(
+        {
+            "request_id": req["request_id"],
+            "arrival_s": arrival_s,
+            "end_s": arrival_s + duration_s,
+            "prompt_tokens": prompt_tok,
+            "max_tokens": max_tok,
+            "duration_s": duration_s,
+        }
+    )
 
 # Find the moment of maximum concurrency (= KV pressure peak)
 # Scan at 1-second granularity over the trace window.
@@ -132,13 +134,15 @@ for e in best_batch:
     # KV tokens currently held ≈ prompt_tokens + generated_so_far
     generated_so_far = int(min(elapsed * DECODE_TPS, e["max_tokens"]))
     kv_held = e["prompt_tokens"] + generated_so_far
-    snapshot.append({
-        "request_id": e["request_id"],
-        "completion_ratio": completion_ratio,
-        "kv_held": kv_held,
-        "prompt_tokens": e["prompt_tokens"],
-        "max_tokens": e["max_tokens"],
-    })
+    snapshot.append(
+        {
+            "request_id": e["request_id"],
+            "completion_ratio": completion_ratio,
+            "kv_held": kv_held,
+            "prompt_tokens": e["prompt_tokens"],
+            "max_tokens": e["max_tokens"],
+        }
+    )
 
 snapshot.sort(key=lambda x: x["completion_ratio"])
 
@@ -165,6 +169,7 @@ BUDGET_FRACTION = 0.20
 total_kv = sum(s["kv_held"] for s in snapshot)
 budget_tokens = total_kv * BUDGET_FRACTION
 
+
 def simulate_policy(policy: str, batch: list[dict]) -> dict:
     remaining = [dict(s) for s in batch]
     freed = 0
@@ -178,90 +183,116 @@ def simulate_policy(policy: str, batch: list[dict]) -> dict:
         freed += v["kv_held"]
         victims.append(v)
     if not victims:
-        return {"avg_victim_kv": 0, "avg_recompute": 0, "cascade_factor": 0,
-                "total_freed": 0, "n_victims": 0, "victims": []}
-    avg_kv       = sum(v["kv_held"] for v in victims) / len(victims)
+        return {
+            "avg_victim_kv": 0,
+            "avg_recompute": 0,
+            "cascade_factor": 0,
+            "total_freed": 0,
+            "n_victims": 0,
+            "victims": [],
+        }
+    avg_kv = sum(v["kv_held"] for v in victims) / len(victims)
     avg_recompute = sum(v["kv_held"] * v["completion_ratio"] for v in victims) / len(victims)
-    cascade      = sum(1.0 + v["completion_ratio"] for v in victims) / len(victims)
+    cascade = sum(1.0 + v["completion_ratio"] for v in victims) / len(victims)
     return {
-        "avg_victim_kv":  avg_kv,
-        "avg_recompute":  avg_recompute,
+        "avg_victim_kv": avg_kv,
+        "avg_recompute": avg_recompute,
         "cascade_factor": cascade,
-        "total_freed":    freed,
-        "n_victims":      len(victims),
-        "victims":        victims,
+        "total_freed": freed,
+        "n_victims": len(victims),
+        "victims": victims,
     }
+
 
 lifo_stats = simulate_policy("lifo", snapshot)
 util_stats = simulate_policy("utility", snapshot)
 
 # Identify the specific victims for annotation in Panel A
-lifo_victim_id  = lifo_stats["victims"][0]["request_id"] if lifo_stats["victims"] else None
-util_victim_id  = util_stats["victims"][0]["request_id"] if util_stats["victims"] else None
+lifo_victim_id = lifo_stats["victims"][0]["request_id"] if lifo_stats["victims"] else None
+util_victim_id = util_stats["victims"][0]["request_id"] if util_stats["victims"] else None
 
-print(f"  LIFO pick:    {lifo_victim_id}  kv={lifo_stats['victims'][0]['kv_held']}  "
-      f"comp={lifo_stats['victims'][0]['completion_ratio']:.1%}")
-print(f"  Utility pick: {util_victim_id}  kv={util_stats['victims'][0]['kv_held']}  "
-      f"comp={util_stats['victims'][0]['completion_ratio']:.1%}")
-print(f"  Recompute cost ratio (LIFO/Utility): "
-      f"{lifo_stats['avg_recompute']/max(util_stats['avg_recompute'],1):.2f}×")
+print(
+    f"  LIFO pick:    {lifo_victim_id}  kv={lifo_stats['victims'][0]['kv_held']}  "
+    f"comp={lifo_stats['victims'][0]['completion_ratio']:.1%}"
+)
+print(
+    f"  Utility pick: {util_victim_id}  kv={util_stats['victims'][0]['kv_held']}  "
+    f"comp={util_stats['victims'][0]['completion_ratio']:.1%}"
+)
+print(
+    f"  Recompute cost ratio (LIFO/Utility): "
+    f"{lifo_stats['avg_recompute'] / max(util_stats['avg_recompute'], 1):.2f}×"
+)
 
 # ---------------------------------------------------------------------------
 # Plotting — ACM sigconf style
 # ---------------------------------------------------------------------------
 import numpy as np
 
-plt.rcParams.update({
-    "font.family": "serif",
-    "font.size": 8,
-    "axes.labelsize": 8,
-    "axes.titlesize": 8,
-    "xtick.labelsize": 6.5,
-    "ytick.labelsize": 7,
-    "legend.fontsize": 6.5,
-    "lines.linewidth": 1.0,
-    "axes.linewidth": 0.6,
-    "grid.linewidth": 0.4,
-    "figure.dpi": 200,
-})
+plt.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.size": 8,
+        "axes.labelsize": 8,
+        "axes.titlesize": 8,
+        "xtick.labelsize": 6.5,
+        "ytick.labelsize": 7,
+        "legend.fontsize": 6.5,
+        "lines.linewidth": 1.0,
+        "axes.linewidth": 0.6,
+        "grid.linewidth": 0.4,
+        "figure.dpi": 200,
+    }
+)
 
 FIG_W = 3.33
 FIG_H = 4.4
 
-fig, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(FIG_W, FIG_H),
-                                  gridspec_kw={"hspace": 0.55})
+fig, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(FIG_W, FIG_H), gridspec_kw={"hspace": 0.55})
 
 # ── Panel A: per-request grouped bar, sorted by kv_held desc ─────────────────
 # Sort snapshot by kv_held descending so the "heaviest" request is on the left
 sorted_snap = sorted(snapshot, key=lambda s: s["kv_held"], reverse=True)
 n = len(sorted_snap)
-req_labels   = [f"R{i+1}" for i in range(n)]
-kv_vals      = [s["kv_held"] for s in sorted_snap]
+req_labels = [f"R{i + 1}" for i in range(n)]
+kv_vals = [s["kv_held"] for s in sorted_snap]
 # recompute cost = tokens that must be reprocessed if preempted now
 #                = kv_held × completion_ratio  (already-computed portion)
-recomp_vals  = [s["kv_held"] * s["completion_ratio"] for s in sorted_snap]
+recomp_vals = [s["kv_held"] * s["completion_ratio"] for s in sorted_snap]
 
 x_pos = np.arange(n)
 bar_w = 0.38
 
-bars_kv = ax_a.bar(x_pos - bar_w/2, kv_vals, bar_w,
-                   color="#4878CF", alpha=0.85, label="KV freed if preempted ($r$)")
-bars_rc = ax_a.bar(x_pos + bar_w/2, recomp_vals, bar_w,
-                   color="#D63027", alpha=0.80, hatch="//",
-                   label="Est. recompute cost ($r \\cdot$ progress)")
+bars_kv = ax_a.bar(
+    x_pos - bar_w / 2,
+    kv_vals,
+    bar_w,
+    color="#4878CF",
+    alpha=0.85,
+    label="KV freed if preempted ($r$)",
+)
+bars_rc = ax_a.bar(
+    x_pos + bar_w / 2,
+    recomp_vals,
+    bar_w,
+    color="#D63027",
+    alpha=0.80,
+    hatch="//",
+    label="Est. recompute cost ($r \\cdot$ progress)",
+)
 
 # Find positions of LIFO and Utility picks in the sorted array
-lifo_pos  = next(i for i, s in enumerate(sorted_snap)
-                 if s["request_id"] == lifo_victim_id)
-util_pos  = next(i for i, s in enumerate(sorted_snap)
-                 if s["request_id"] == util_victim_id)
+lifo_pos = next(i for i, s in enumerate(sorted_snap) if s["request_id"] == lifo_victim_id)
+util_pos = next(i for i, s in enumerate(sorted_snap) if s["request_id"] == util_victim_id)
 
 # Annotate LIFO pick — text inside axes, arrow points to bar top
 ax_a.annotate(
     "LIFO\npicks",
-    xy=(lifo_pos - bar_w/2, kv_vals[lifo_pos]),
+    xy=(lifo_pos - bar_w / 2, kv_vals[lifo_pos]),
     xytext=(lifo_pos + 0.85, kv_vals[lifo_pos] * 0.60),
-    fontsize=5.5, color="#1a5fa8", fontweight="bold",
+    fontsize=5.5,
+    color="#1a5fa8",
+    fontweight="bold",
     arrowprops=dict(arrowstyle="->", color="#1a5fa8", lw=0.7),
     ha="center",
     bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.85, ec="none"),
@@ -269,67 +300,71 @@ ax_a.annotate(
 # Annotate Utility pick
 ax_a.annotate(
     "Utility\npicks",
-    xy=(util_pos + bar_w/2, recomp_vals[util_pos]),
-    xytext=(util_pos + bar_w/2 + 1.1, recomp_vals[util_pos] * 2.8),
-    fontsize=6, color="#8b1a1a", fontweight="bold",
+    xy=(util_pos + bar_w / 2, recomp_vals[util_pos]),
+    xytext=(util_pos + bar_w / 2 + 1.1, recomp_vals[util_pos] * 2.8),
+    fontsize=6,
+    color="#8b1a1a",
+    fontweight="bold",
     arrowprops=dict(arrowstyle="->", color="#8b1a1a", lw=0.8),
     ha="center",
 )
 
 ax_a.set_xticks(x_pos)
 ax_a.set_xticklabels(req_labels)
-ax_a.set_xlabel("Concurrent requests at pressure event\n"
-                "(sorted by KV tokens held, high→low)")
+ax_a.set_xlabel("Concurrent requests at pressure event\n(sorted by KV tokens held, high→low)")
 ax_a.set_ylabel("Tokens")
-ax_a.set_title(f"(a) Per-request KV footprint vs. recompute cost\n"
-               f"({n} concurrent requests, long-context, rate=0.5 req/s)",
-               pad=3)
-ax_a.yaxis.set_major_formatter(ticker.FuncFormatter(
-    lambda x, _: f"{int(x):,}"))
-ax_a.legend(loc="upper right", framealpha=0.85,
-            handletextpad=0.3, borderpad=0.4, ncol=1)
+ax_a.set_title(
+    f"(a) Per-request KV footprint vs. recompute cost\n"
+    f"({n} concurrent requests, long-context, rate=0.5 req/s)",
+    pad=3,
+)
+ax_a.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
+ax_a.legend(loc="upper right", framealpha=0.85, handletextpad=0.3, borderpad=0.4, ncol=1)
 ax_a.grid(True, axis="y", linestyle=":", alpha=0.5)
 
 # ── Panel B: policy comparison (3 metrics) ────────────────────────────────────
-metrics     = ["Tokens\nfreed", "Avg recompute\ncost", "Cascade\nfactor (est.)"]
-lifo_vals_b = [lifo_stats["total_freed"],
-               lifo_stats["avg_recompute"],
-               lifo_stats["cascade_factor"]]
-util_vals_b = [util_stats["total_freed"],
-               util_stats["avg_recompute"],
-               util_stats["cascade_factor"]]
+metrics = ["Tokens\nfreed", "Avg recompute\ncost", "Cascade\nfactor (est.)"]
+lifo_vals_b = [lifo_stats["total_freed"], lifo_stats["avg_recompute"], lifo_stats["cascade_factor"]]
+util_vals_b = [util_stats["total_freed"], util_stats["avg_recompute"], util_stats["cascade_factor"]]
 
 # Normalise each metric to utility-guided = 1.0 for fair comparison
-norm_vals   = [max(u, 1e-9) for u in util_vals_b]
-lifo_norm   = [l / n_ for l, n_ in zip(lifo_vals_b, norm_vals)]
-util_norm   = [1.0] * len(metrics)
+norm_vals = [max(u, 1e-9) for u in util_vals_b]
+lifo_norm = [l / n_ for l, n_ in zip(lifo_vals_b, norm_vals)]
+util_norm = [1.0] * len(metrics)
 
-x2      = np.arange(len(metrics))
-bar_w2  = 0.32
+x2 = np.arange(len(metrics))
+bar_w2 = 0.32
 
-b_lifo = ax_b.bar(x2 - bar_w2/2, lifo_norm, bar_w2,
-                   color="#D63027", alpha=0.85, label="Coarse (LIFO-like)")
-b_util = ax_b.bar(x2 + bar_w2/2, util_norm,  bar_w2,
-                   color="#4878CF", alpha=0.85, label="Utility-guided")
+b_lifo = ax_b.bar(
+    x2 - bar_w2 / 2, lifo_norm, bar_w2, color="#D63027", alpha=0.85, label="Coarse (LIFO-like)"
+)
+b_util = ax_b.bar(
+    x2 + bar_w2 / 2, util_norm, bar_w2, color="#4878CF", alpha=0.85, label="Utility-guided"
+)
 
 # Value labels — show normalised multiplier (e.g. "5.0×") to match the y-axis
 for bar_group in [b_lifo, b_util]:
     for bar in bar_group:
         h = bar.get_height()
         label = f"{h:.1f}×"
-        ax_b.text(bar.get_x() + bar.get_width() / 2, h + 0.06,
-                  label, ha="center", va="bottom", fontsize=5.5)
+        ax_b.text(
+            bar.get_x() + bar.get_width() / 2,
+            h + 0.06,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=5.5,
+        )
 
-ax_b.axhline(1.0, color="gray", linestyle="--", linewidth=0.6,
-             label="Utility-guided baseline (=1.0)")
+ax_b.axhline(
+    1.0, color="gray", linestyle="--", linewidth=0.6, label="Utility-guided baseline (=1.0)"
+)
 ax_b.set_xticks(x2)
 ax_b.set_xticklabels(metrics)
 ax_b.set_ylabel("Normalized to utility-guided")
-ax_b.set_title("(b) Aggregate policy comparison\n"
-               "(freeing 20% of total KV capacity)", pad=3)
+ax_b.set_title("(b) Aggregate policy comparison\n(freeing 20% of total KV capacity)", pad=3)
 ax_b.set_ylim(0, max(lifo_norm) * 1.60)
-ax_b.legend(loc="upper left", framealpha=0.85,
-            handletextpad=0.3, borderpad=0.4)
+ax_b.legend(loc="upper left", framealpha=0.85, handletextpad=0.3, borderpad=0.4)
 ax_b.grid(True, axis="y", linestyle=":", alpha=0.5)
 
 # ── Save ─────────────────────────────────────────────────────────────────────

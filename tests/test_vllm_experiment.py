@@ -285,7 +285,7 @@ class TestRunResultPersistence:
                     total_latency_ms=200.0,
                 ),
             ],
-            adapter_metrics={"total_compressions": 5, "total_tokens_freed": 1024},
+            adapter_metrics={"total_evictions": 5, "total_tokens_freed": 1024},
         )
 
         path = save_run_result(result, tmp_path)
@@ -296,7 +296,7 @@ class TestRunResultPersistence:
         assert loaded.request_rate == 2.0
         assert len(loaded.request_results) == 1
         assert loaded.request_results[0].ttft_ms == 50.0
-        assert loaded.adapter_metrics["total_compressions"] == 5
+        assert loaded.adapter_metrics["total_evictions"] == 5
 
     def test_save_with_candidate_snapshots(self, tmp_path: pytest.TempPathFactory) -> None:
         result = RunResult(
@@ -374,7 +374,7 @@ class TestAggregation:
                         for i in range(10)
                     ],
                     adapter_metrics={
-                        "total_compressions": 2 + run_idx,
+                        "total_evictions": 2 + run_idx,
                         "total_tokens_freed": 100 + run_idx * 50,
                         "total_pressure_events": 5,
                     },
@@ -412,17 +412,17 @@ class TestTable1:
     def test_table1_has_all_strategies(self) -> None:
         table = generate_table1_data([])
         strategies = {row["strategy"] for row in table}
-        assert "h2o-style" in strategies  # H2O-Style 必须出现
+        assert "largest-first" in strategies  # Largest-First 必须出现
         assert "bidkv" in strategies
         assert len(strategies) == 7
 
-    def test_table1_h2o_style_present(self) -> None:
-        """H2O-Style 必须出现在 Table 1 中（issue-047 验收标准）。"""
+    def test_table1_largest_first_present(self) -> None:
+        """Largest-First 必须出现在 Table 1 中（was H2O-Style, issue-047 验收标准）。"""
         table = generate_table1_data([])
-        h2o_rows = [r for r in table if r["strategy"] == "h2o-style"]
-        assert len(h2o_rows) == 1
-        assert h2o_rows[0]["has_scoring"] is True
-        assert h2o_rows[0]["has_bid"] is False
+        lf_rows = [r for r in table if r["strategy"] == "largest-first"]
+        assert len(lf_rows) == 1
+        assert lf_rows[0]["has_scoring"] is True
+        assert lf_rows[0]["has_bid"] is False
 
 
 class TestExportSummary:
@@ -504,8 +504,8 @@ class TestCandidateConsistency:
                 ],
             ),
             RunResult(
-                run_label="h2o-style__mixed__rate2.0__r0",
-                strategy="h2o-style",
+                run_label="largest-first__mixed__rate2.0__r0",
+                strategy="largest-first",
                 workload="mixed",
                 request_rate=2.0,
                 run_index=0,
@@ -515,7 +515,7 @@ class TestCandidateConsistency:
                         pressure_ratio=0.9,
                         candidate_request_ids=["r1", "r2", "r3"],
                         needed_tokens=512,
-                        strategy_name="h2o-style",
+                        strategy_name="largest-first",
                     ),
                 ],
             ),

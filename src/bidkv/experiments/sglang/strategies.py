@@ -21,7 +21,7 @@ from bidkv.baselines import (
     PreemptEvictStrategy,
     SlackAwareStrategy,
 )
-from bidkv.scoring import H2OScoring
+from bidkv.scoring import PositionalScoring
 
 # SGLang 实验使用的 3 个策略名称（v2.3 frozen）
 SGLANG_STRATEGIES: tuple[str, ...] = (
@@ -90,15 +90,15 @@ def create_sglang_strategy_configs() -> list[SGLangStrategyConfig]:
 
 def create_sglang_registry(
     *,
-    h2o_scoring: H2OScoring | None = None,
+    positional_scoring: PositionalScoring | None = None,
     delta_budget: float = 0.15,
 ) -> BaselineRegistry:
     """创建包含 SGLang 3 个策略的 registry。
 
     Parameters
     ----------
-    h2o_scoring:
-        共享的 H2OScoring 实例。若为 None 使用默认配置。
+    positional_scoring:
+        共享的 PositionalScoring 实例。若为 None 使用默认配置。
     delta_budget:
         BidKV 的 delta_budget。
 
@@ -107,7 +107,7 @@ def create_sglang_registry(
     BaselineRegistry
         包含 3 个策略的 registry。
     """
-    scoring = h2o_scoring or H2OScoring()
+    scoring = positional_scoring or PositionalScoring()
     registry = BaselineRegistry()
 
     registry.register(PreemptEvictStrategy())

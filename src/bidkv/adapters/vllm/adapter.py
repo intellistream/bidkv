@@ -324,7 +324,7 @@ class VLLMAdapter(FrameworkAdapter):
         except Exception:  # noqa: BLE001
             return 0
 
-        self._metrics.record_compression(request_id, freed_tokens)
+        self._metrics.record_eviction(request_id, freed_tokens)
         return freed_tokens
 
     def _execute_tail_truncation(self, request_id: str, target_tokens: int) -> int:
@@ -451,7 +451,7 @@ class VLLMAdapter(FrameworkAdapter):
         self._sync_model_runner_block_table(request_id, result.new_num_blocks)
 
         # Record metrics
-        self._metrics.record_compression(request_id, result.actual_freed_tokens)
+        self._metrics.record_eviction(request_id, result.actual_freed_tokens)
 
         logger.debug(
             "Truncation: request=%s, freed=%d blocks (%d tokens), new_boundary=%d",

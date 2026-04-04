@@ -2,7 +2,7 @@
 
 这是 BidKV 的完整策略包装器（作为 baseline 接口的适配器）。
 scorer-agnostic：支持任意实现 ScoringStrategy 的评分器，
-默认使用 H2OScoring。
+默认使用 PositionalScoring。
 
 选择公式：U = output_tokens / (δ + ε)，greedy by U（Algorithm 1）。
 
@@ -33,7 +33,7 @@ from typing import Any
 from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
 from bidkv.pool import BidPoolManager
 from bidkv.protocol.bid import CompressionBid, make_bid_id
-from bidkv.scoring import H2OScoring, ScoringStrategy
+from bidkv.scoring import PositionalScoring, ScoringStrategy
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
 
@@ -46,7 +46,7 @@ class BidKVStrategy(BaselineStrategy):
     Parameters
     ----------
     scoring:
-        ScoringStrategy 实例。若为 None，使用 H2OScoring 默认配置创建。
+        ScoringStrategy 实例。若为 None，使用 PositionalScoring 默认配置创建。
     delta_budget:
         质量损失上限。默认 0.15。
     """
@@ -57,7 +57,7 @@ class BidKVStrategy(BaselineStrategy):
         scoring: ScoringStrategy | None = None,
         delta_budget: float = 0.15,
     ) -> None:
-        self._scoring: ScoringStrategy = scoring or H2OScoring()
+        self._scoring: ScoringStrategy = scoring or PositionalScoring()
         self._delta_budget = delta_budget
         self._solver = GreedyBidSolver(SolverConfig(enabled=True, delta_budget=delta_budget))
 
@@ -69,24 +69,6 @@ class BidKVStrategy(BaselineStrategy):
     def scoring(self) -> ScoringStrategy:
         """当前使用的评分策略实例。"""
         return self._scoring
-
-    @staticmethod
-    def _completion_factor(req: RequestState) -> float:
-        """Compute recompute-cost penalty multiplier for a candidate.
-
-        Near-completion requests get a multiplier > 1 that inflates their
-        token scores → higher quality_delta → lower utility. This steers the
-        solver away from truncating requests that would be expensive to redo
-        with little remaining benefit.
-
-        Returns 1.0 (no penalty) for requests with unknown completion info.
-        """
-        if req.max_output_tokens <= 0 or req.num_computed_tokens <= 0:
-            return 1.0
-        num_output = max(0, req.num_computed_tokens - req.num_prompt_tokens)
-        completion = min(1.0, num_output / req.max_output_tokens)
-        # Quadratic ramp: 0% → 1.0×, 50% → 2.0×, 80% → 3.56×, 100% → 5.0×
-        return 1.0 + completion * completion * 4.0
 
     def select_victims(
         self,

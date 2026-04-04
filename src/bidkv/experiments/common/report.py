@@ -135,7 +135,9 @@ class ExperimentReport:
                 ),
                 p99_ttft_ms=metrics_data["p99_ttft_ms"],
                 throughput_rps=metrics_data["throughput_rps"],
-                compression_coverage=metrics_data["compression_coverage"],
+                eviction_coverage=metrics_data.get(
+                    "eviction_coverage", metrics_data.get("compression_coverage", 0.0)
+                ),
                 quality_rouge1=metrics_data.get("quality_rouge1"),
                 quality_em=metrics_data.get("quality_em"),
                 adapter_metrics=metrics_data.get("adapter_metrics", {}),

@@ -32,7 +32,7 @@ FIG_DIR = PAPER_DIR / "figures"
 STRATEGIES_ORDER = [
     "preempt-evict",
     "static-random",
-    "h2o-style",
+    "h2o-style",  # legacy name in result files; displays as Largest-First
     "uniform",
     "global-nobid",
     "slack-aware",
@@ -42,7 +42,7 @@ STRATEGIES_ORDER = [
 STRATEGY_DISPLAY = {
     "preempt-evict": "Preempt-Evict",
     "static-random": "Static-Random",
-    "h2o-style": "H2O-Style",
+    "h2o-style": "Largest-First",
     "uniform": "Uniform",
     "global-nobid": "Global-NoBid",
     "slack-aware": "Slack-Aware",
@@ -105,7 +105,7 @@ def load_run(filepath: Path) -> dict:
         "tpot_p95": percentile(tpots, 95),
         "tpot_p99": percentile(tpots, 99),
         "slo_attainment": slo_pct,
-        "eviction_count": am.get("total_compressions", 0),
+        "eviction_count": am.get("total_evictions", am.get("total_compressions", 0)),
         "tokens_freed": am.get("total_tokens_freed", 0),
         "total_requests": total,
         "successful_requests": success,
@@ -417,7 +417,7 @@ def generate_figures(rows: list[dict]) -> None:
     display = {
         "preempt-evict": "Preempt-Evict",
         "static-random": "Static-Random",
-        "h2o-style": "H2O-Style",
+        "h2o-style": "Largest-First",
         "uniform": "Uniform",
         "global-nobid": "Global-NoBid",
         "slack-aware": "Slack-Aware",
