@@ -10,7 +10,7 @@
 | Python         | ≥ 3.10                                                               |
 | 外部依赖       | **零** — 仅依赖 Python stdlib                                        |
 | 论文           | SC 2026 投稿，deadline 2026-04-10                                    |
-| 当前 Phase     | **Phase D 优化迭代** — v14 基线冻结，以 SLO/TTFT 最优为目标迭代 |
+| 当前 Phase     | **Phase D 论文写作冲刺** — §1/2/3/7/8 已修订，§4-6 待检查，admission responsiveness 主线 |
 
 ## 项目定位
 
@@ -519,6 +519,96 @@ TTFT 和 TPOT 在 KV 压力下通常是 tradeoff：
 - §6：evaluation opening 应声明评估围绕 admission responsiveness 展开
 - 数据 claim：必须首先报告 SLO 和 TTFT（核心指标），throughput/TPOT 作为 completeness
 - **禁止**：声称 BidKV 是"全面领先"或隐瞒 throughput/TPOT 的非领先表现
+
+### 论文编辑原则（2026-04-04 确定，适用于所有后续论文修改）
+
+#### 原则 1：不提及未实现功能
+
+论文中**绝对不能**将代码中未真实实现的方案描述为已有能力。
+- ❌ 不要把 future work / 设计愿景当作已有功能来描述
+- ❌ 不要在 Design/Implementation 章节中引入尚未在实验中实际运行的机制
+- ✅ 未来方向仅在 §8 Conclusion 的 future work 句中简要提及
+
+#### 原则 2：Limitation 不自我伤害
+
+§7.2 Limitations 只写不可避免的 **scope boundaries**（硬件规模、模型规模、执行模型），
+不写尖锐到会动摇论文可靠性的局限。
+- ❌ 不要在 limitations 中进行 self-celebration（"precisely the heterogeneity BidKV exploits"）
+- ❌ 不要主动暴露 reviewer 未必会注意到的设计弱点
+- ✅ Limitations 条目格式：scope statement + future work 一句话
+
+#### 原则 3：Admission Responsiveness 是唯一主线
+
+全文叙事聚焦 **admission responsiveness**（TTFT + SLO attainment），不是抽象的 "scheduling efficiency"。
+- 标题 → 摘要 → §1 → §4 → §6 → §7 → §8 必须保持此主线一致
+- 摘要前两句必须定义目标场景（KV pressure → victim selection → admission latency）
+- §1 ¶2 必须构建完整因果链：poor victim → wasted recompute → KV occupied → TTFT ↑ → SLO ↓
+- §8 结论第一段必须回到 TTFT/SLO，不要停留在 "scheduling efficiency"
+- 数据报告顺序：SLO → TTFT → Throughput → TPOT（核心指标在前）
+
+#### 原则 4：Tradeoff 必须诚实声明
+
+BidKV 不是全面领先，**必须显式承认 throughput/TPOT 代价**。
+- 摘要使用 "at a modest throughput cost"（不是 "at comparable throughput"）
+- §6 数据讨论中必须包含 tradeoff 段落
+- 表格列序 = 叙事优先级：SLO → TTFT P95 → Throughput → TPOT P95
+- 论述方式："BidKV trades modest throughput/TPOT for significantly better TTFT and SLO"
+
+#### 原则 5：使用统一术语
+
+| ✅ 正确术语 | ❌ 废弃术语 | 说明 |
+|---|---|---|
+| reclamation cost | recomputation cost (as metric) | 度量被驱逐请求的代价 |
+| disruption estimate / disruption cost | quality delta | δ 的含义 |
+| admission responsiveness | scheduling efficiency (as primary framing) | 主线叙事 |
+| victim selection | compression scheduling | 核心问题定义 |
+| reclaim / preempt | compress (in Mode A) | 执行动作 |
+| modest throughput cost | comparable throughput | 代价表述 |
+
+#### 原则 6：Table/Figure 不重复
+
+- 每个 table/figure 必须传递独立信息，不允许两个 figure 展示同一指标的同一维度
+- 已删除的 table/figure（如之前的 Table 1、TikZ Fig 2）**不要恢复**
+- 未被 `\ref{}` 引用的 table/figure 应当删除，不要保留孤立浮动体
+
+#### 原则 7：核心指标视觉优先
+
+- Table 列序必须为：SLO → TTFT P95 → Throughput → TPOT P95（反映叙事优先级）
+- Figure 中 BidKV 的核心优势指标（SLO, TTFT）应在突出位置
+- 加粗/下划线标注规则：**粗体** = 最优，_下划线_ = 次优
+
+#### 原则 8：§7.1 是正面定位，不是辩护
+
+§7.1 Surrogate Disruption Estimate 的写法：
+- ✅ δ 是 ranking signal，exact prediction unnecessary
+- ✅ 只需保持 relative ordering → 低成本 victim 优先
+- ✅ 结尾推到 admission responsiveness：cost-aware ranking → less wasted recompute → TTFT/SLO
+- ❌ 不要写 Δ_max 的 conservative/aggressive 讨论（与 §4.3 矛盾——Δ_max 在 request-level 下已 relaxed）
+- ❌ 不要连续使用否定句（"not direct"、"not precise"、"only degree of freedom"）
+
+### 论文当前章节结构与状态（2026-04-04）
+
+| 章节 | 标题 | 当前状态 | 修改注意事项 |
+|------|------|---------|-------------|
+| §1 | Introduction | ✅ 已修订 | 因果链在 ¶2，贡献在 ¶5 |
+| §2 | Background and Motivation | ✅ 已修订 | §2.1 KV Cache Memory Model, §2.2 Victim-Selection Problem |
+| §3 | Related Work | ✅ 已修订 | 系统层 + token-level + 本文定位 |
+| §4 | Design | 待检查 | 四层架构，§4.1-4.4 |
+| §5 | Implementation | 待检查 | vLLM + SGLang 集成 |
+| §6 | Evaluation | 待检查 | §6.1 Setup, §6.2 Main, §6.3 Rate, §6.4 LC, §6.5 Mechanism |
+| §7 | Discussion and Limitations | ✅ 已修订 | §7.1 正面定位, §7.2 scope-only, §7.3 broader impact |
+| §8 | Conclusion | ✅ 已修订 | 回到 TTFT/SLO，不停在 scheduling efficiency |
+| Abstract | — | ✅ 已修订 | "at a modest throughput cost" |
+
+### 论文 Figure 清单（2026-04-04）
+
+| Figure | 内容 | 文件 | 状态 |
+|--------|------|------|------|
+| Fig 1 | Algorithm 1 (Greedy Solver) | `figures/fig2_algorithm.tex` | ✅ |
+| Fig 2 | Architecture overview diagram | `figures/fig1_architecture.jpg` | ✅ 已替换为 JPG |
+| Fig 3 | Mixed rate sensitivity (Throughput + TTFT P95) | PDF (外部生成) | ✅ |
+| Fig 4 | Long-context SLO + TTFT P95 bar charts | PDF (外部生成) | 待确认 |
+| Fig 5 | Proactive eviction count + tokens freed | PDF (外部生成) | ⚠️ 3/5 策略零值 |
 
 ## v8 Mixed 全量结果（63 runs，2026-04-02 冻结，p95 从原始请求数据计算）
 

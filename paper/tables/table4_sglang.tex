@@ -1,0 +1,25 @@
+\begin{table}[t]
+\centering
+\caption{Framework portability: SGLang (mixed workload, rate\,=\,5.7\,req/s,
+  Llama-3.1-8B-Instruct, A6000, 1{,}000~req/run, SLO threshold 300\,ms,
+  mean of 3~runs).  Vanilla SGLang applies no managed victim selection;
+  Random-Evict and \bidkv deploy \bidkv's adapter with random and
+  utility-ranked victim selection respectively.  Best among active strategies
+  in \textbf{bold}; second-best \underline{underlined}.
+  $^\dagger$Vanilla SGLang's low TPOT reflects unobstructed decode throughput,
+  not admission efficiency; its TTFT P95 of 6{,}246\,ms indicates severe
+  admission-latency degradation.}
+\label{tab:sglang}
+\footnotesize
+\begin{tabular}{@{}l c c c c@{}}
+\toprule
+\textbf{Strategy} & \textbf{SLO}
+  & \textbf{TTFT P95} & \textbf{Throughput} & \textbf{TPOT P95} \\
+  & (300\,ms, \%) & (ms) & (req/s) & (ms) \\
+\midrule
+Vanilla SGLang    & 55.2 & 6246 & 3.04 & 58.7$^\dagger$ \\
+Random-Evict      & \underline{85.7} & \underline{878} & \textbf{5.57} & \underline{88.9} \\
+\textbf{BidKV}    & \textbf{86.9} & \textbf{598} & \underline{5.53} & \textbf{85.4} \\
+\bottomrule
+\end{tabular}
+\end{table}

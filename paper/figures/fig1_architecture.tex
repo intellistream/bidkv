@@ -9,9 +9,9 @@ pressure threshold~(\ding{172}), the scheduling layer
 activates~(\ding{173}): the pressure detector triggers bid generation,
 which computes disruption cost~$\qualdelta$ for each running request and
 ranks candidates by utility $U = r/(\qualdelta + \varepsilon)$
-(\ding{174}).  The solver selects the victim~(\ding{175}) and the
+(\ding{174}).  The selection layer identifies the top-ranked victim~(\ding{175}); the
 framework adapter preempts the chosen request, freeing its KV
-blocks~(\ding{177}).  The preempted request re-enters the waiting queue
+blocks~(\ding{176}).  The preempted request re-enters the waiting queue
 for later recomputation~(\ding{177}).}
 \label{fig:architecture}
 \end{figure}

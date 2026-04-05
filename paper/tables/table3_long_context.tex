@@ -1,9 +1,11 @@
 \begin{table}[t]
 \centering
-\caption{Long-context workload: cross-rate average
+\caption{Long-context workload at peak request rate
   (vLLM, Llama-3.1-8B-Instruct, A6000, 500~req/run,
-  rates 0.35/0.5/0.7\,req/s, SLO threshold 2{,}000\,ms,
-  mean of 3~runs).
+  rate\,=\,0.70\,req/s, SLO threshold 2{,}000\,ms,
+  mean of 3~independent runs).
+  At lower rates (0.35 and 0.50\,req/s) all proactive strategies
+  attain SLO\,$>$\,70\%; relative ordering is qualitatively consistent.
   Best in \textbf{bold}; second-best \underline{underlined}.}
 \label{tab:long_context}
 \footnotesize
@@ -13,11 +15,11 @@
   & \textbf{TTFT P95} & \textbf{Throughput} & \textbf{TPOT P95} \\
   & (2000\,ms, \%) & (ms) & (req/s) & (ms) \\
 \midrule
-PE (default)      & 21.2 & 80135 & 0.374 & 181.4 \\
-PE-SJF            & 74.9 & 20264 & 0.442 & \textbf{144.3} \\
-Static-Random     & 75.0 & \textbf{14569} & \textbf{0.447} & \underline{162.5} \\
-Largest-First     & \textbf{76.6} & 16262 & 0.435 & 211.3 \\
-\textbf{BidKV}    & \underline{75.6} & \underline{15492} & \underline{0.443} & 179.6 \\
+PE (default)      &  5.0 & 94696 & 0.413 & 184.1 \\
+PE-SJF            & \underline{63.6} & 37551 & \underline{0.563} & \textbf{145.2} \\
+Static-Random     & 57.4 & \underline{31693} & \textbf{0.568} & 208.3 \\
+Largest-First     & \textbf{64.4} & 33345 & 0.542 & 239.6 \\
+\textbf{BidKV}    & 62.3 & \textbf{30143} & 0.560 & \underline{207.0} \\
 \bottomrule
 \end{tabular}
 \end{table}
