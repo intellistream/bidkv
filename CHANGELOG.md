@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **BidKV radix-tree-aware victim selection for SGLang** (2026-04-08):
+  - `baselines/base.py`: `RequestState` 新增 `private_tokens: int = 0` 字段，
+    表示请求中不与其他请求共享的 KV token 数量（SGLang radix 树感知）；0 = 不可用（vLLM）
+  - `adapters/sglang/radix_hook.py`: 新增两个公开 API：
+    - `get_shared_kv_slots(scheduler) -> frozenset[int]`：一次遍历 radix 树，收集
+      所有 `lock_ref > 1` 节点的 KV slot 集合（O(tree_nodes)，批量高效）
+    - `get_private_token_count(scheduler, rid, num_tokens, shared_slots=None) -> int`：
+      计算请求中不在共享集合里的 token 数量（O(num_tokens)，可复用预计算的 shared_slots）
+  - `adapters/sglang/scheduler_hook.py`: `_build_running_candidates()` 新增
+    `scheduler: Any | None = None` 参数；当 scheduler 可用时，每次调用预计算一次
+    `shared_slots`，再为每个请求计算 `private_tokens`，并写入 `RequestState`；
+    `_refresh_priority_cache` 中传入 `scheduler=scheduler`；`needed_all` 改为优先使用
+    `private_tokens`（若可用）以准确反映实际可回收的 KV 空间
+  - `baselines/bidkv_strategy.py`: `select_victims()` 改为双分支公式：
+    - **Branch A（radix-aware）**：当 `req.private_tokens > 0` 时，
+      `tokens_freed = private_tokens`，`δ = max(0.1, private_tokens/RECOMPUTE_DIV + completion·CW + P·SW)`；
+      分子只计实际可回收的私有 KV，分母 recompute cost 也仅对私有 token 归一化（共享 prefix 不需重算）
+    - **Branch B（v8-frozen 回退）**：`private_tokens = 0`（vLLM 或 SGLang 树访问失败），
+      保持 `tokens_freed = current_tokens`，`δ = 1 + 0.5c + 0.3P`（与之前完全相同）
+    - 新增 `if tokens_freed <= 0: continue` 防卫，跳过无 KV 可回收的请求
+
+
+
 - **Figure 3 eviction analysis: 5-strategy × mixed × rate=3.8 × 3 runs = 15 runs** (2026-04-06):
   - 新增 `AdapterMetrics.record_all_preemption()`，包装 `scheduler._preempt_request` instance attr
     捕获所有 preemption（native LIFO + proactive + SRPT），修复旧 Figure 3 所有策略全零 bar 的问题

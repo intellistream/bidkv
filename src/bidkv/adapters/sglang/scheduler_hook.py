@@ -366,12 +366,15 @@ def _refresh_priority_cache(scheduler: Any, adapter: SGLangAdapter) -> None:
     if len(running_reqs) < 2:
         return
 
-    pairs = _build_running_candidates(running_reqs, adapter)
+    pairs = _build_running_candidates(running_reqs, adapter, scheduler=scheduler)
     candidates = [p[0] for p in pairs]
     if len(candidates) < 2:
         return
 
-    needed_all = sum(c.current_tokens for c in candidates) or 1
+    needed_all = sum(
+        c.private_tokens if c.private_tokens > 0 else c.current_tokens
+        for c in candidates
+    ) or 1
 
     try:
         actions = strategy.select_victims(candidates, needed_all)
@@ -582,13 +585,32 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
 
 
 def _build_running_candidates(
-    running_reqs: list[Any], adapter: SGLangAdapter
+    running_reqs: list[Any],
+    adapter: SGLangAdapter,
+    scheduler: Any | None = None,
 ) -> list[tuple[Any, Any]]:
-    """Build (RequestState, sglang_request) pairs from running requests."""
+    """Build (RequestState, sglang_request) pairs from running requests.
+
+    When ``scheduler`` is provided, computes ``private_tokens`` for each
+    request by querying the SGLang radix tree.  The shared KV slot set is
+    built once per call to avoid repeated tree traversals.
+    """
     from bidkv.baselines.base import RequestState
 
     now_ms = time.monotonic() * 1000
     slo_timeout_ms = 120_000.0
+
+    # Pre-compute shared KV slots once for the whole batch (O(tree_nodes))
+    shared_slots: "frozenset[int] | None" = None
+    if scheduler is not None:
+        try:
+            from bidkv.adapters.sglang.radix_hook import (
+                get_private_token_count,
+                get_shared_kv_slots,
+            )
+            shared_slots = get_shared_kv_slots(scheduler)
+        except Exception:  # noqa: BLE001
+            shared_slots = None
 
     pairs: list[tuple[Any, Any]] = []
     for req in running_reqs:
@@ -612,6 +634,17 @@ def _build_running_candidates(
 
         priority = -arrival_ms
 
+        # Compute private_tokens: KV tokens that WILL actually be freed on eviction
+        # (i.e. not shared with any other request in the radix tree).
+        private_tokens = 0
+        if scheduler is not None and shared_slots is not None and num_computed > 0:
+            try:
+                private_tokens = get_private_token_count(
+                    scheduler, rid, num_computed, shared_slots=shared_slots
+                )
+            except Exception:  # noqa: BLE001
+                private_tokens = 0
+
         pairs.append(
             (
                 RequestState(
@@ -625,6 +658,7 @@ def _build_running_candidates(
                     num_computed_tokens=num_computed,
                     max_output_tokens=max_output,
                     num_preemptions=num_preemptions,
+                    private_tokens=private_tokens,
                 ),
                 req,
             )

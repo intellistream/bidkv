@@ -103,6 +103,107 @@ def free_kv_positions(
     return freed_count
 
 
+def get_shared_kv_slots(scheduler: Any) -> frozenset[int]:
+    """Collect all KV slots that are in shared (lock_ref > 1) radix tree nodes.
+
+    Traverses the radix tree ONCE and returns a frozenset of shared KV slot IDs.
+    Use this as a pre-computed cache when computing private token counts for
+    multiple requests in one batch (avoids repeated tree traversals).
+
+    Parameters
+    ----------
+    scheduler:
+        SGLang Scheduler 实例。
+
+    Returns
+    -------
+    frozenset[int]
+        All KV slot IDs that belong to shared radix tree nodes.
+        Empty frozenset if radix cache is unavailable.
+    """
+    radix_cache = _get_radix_cache(scheduler)
+    if radix_cache is None or not hasattr(radix_cache, "root_node"):
+        return frozenset()
+    shared: set[int] = set()
+    _collect_shared_kv_slots(radix_cache.root_node, shared)
+    return frozenset(shared)
+
+
+def _collect_shared_kv_slots(node: Any, shared: set[int]) -> None:
+    """递归收集 lock_ref > 1 节点中的所有 KV slot ID。"""
+    if node is None:
+        return
+    ref_count = getattr(node, "lock_ref", 0)
+    if ref_count > 1:
+        value = getattr(node, "value", None)
+        if value is not None:
+            if hasattr(value, "tolist"):
+                shared.update(value.tolist())
+            elif hasattr(value, "__iter__"):
+                shared.update(value)
+    for child in getattr(node, "children", {}).values():
+        _collect_shared_kv_slots(child, shared)
+
+
+def get_private_token_count(
+    scheduler: Any,
+    request_id: str,
+    num_tokens: int,
+    shared_slots: frozenset[int] | None = None,
+) -> int:
+    """Count how many of a request's KV tokens are NOT shared with other requests.
+
+    Uses the radix tree's lock_ref to determine shared vs. private KV slots.
+    Private tokens are those that WILL actually be freed when this request is
+    evicted — the meaningful quantity for BidKV's tokens_freed estimate.
+
+    Parameters
+    ----------
+    scheduler:
+        SGLang Scheduler 实例（需要访问 req_to_token_pool 和 radix tree）。
+    request_id:
+        目标请求 ID。
+    num_tokens:
+        该请求在 KV 中占用的 token 数（通常为 num_computed_tokens）。
+    shared_slots:
+        预计算的共享 slot 集合（由 get_shared_kv_slots() 返回）。
+        如果为 None，则内部自动调用 get_shared_kv_slots()。
+        批量处理时建议预先计算并传入，避免重复树遍历。
+
+    Returns
+    -------
+    int
+        私有 token 数量（0 表示全部共享或无法访问 pool）。
+    """
+    if num_tokens <= 0:
+        return 0
+
+    req_to_token_pool = _get_req_to_token_pool(scheduler)
+    if req_to_token_pool is None:
+        return 0
+
+    req_pool_idx = _find_request_pool_index(scheduler, request_id)
+    if req_pool_idx is None:
+        return 0
+
+    token_indices = _get_token_indices(req_to_token_pool, req_pool_idx)
+    if token_indices is None or len(token_indices) == 0:
+        return 0
+
+    # Build shared slots set lazily if not provided
+    if shared_slots is None:
+        shared_slots = get_shared_kv_slots(scheduler)
+
+    private_count = 0
+    limit = min(num_tokens, len(token_indices))
+    for pos in range(limit):
+        kv_slot = token_indices[pos]
+        if kv_slot not in shared_slots:
+            private_count += 1
+
+    return private_count
+
+
 def get_shared_prefix_positions(
     scheduler: Any,
     request_id: str,

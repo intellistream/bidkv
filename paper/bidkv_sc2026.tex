@@ -282,40 +282,51 @@ re-queues it for full prompt recomputation when rescheduled; the reclamation
 policy does not alter final output tokens.
 
 \paragraph{Empirical evidence.}
-Figure~\ref{fig:motivation} illustrates the victim-selection gap at a
-KV-pressure snapshot from a long-context ShareGPT trace (rate=0.5\,req/s;
-the same effect arises under mixed-length workloads at smaller absolute scale,
-Section~\ref{sec:eval}).
-Panel~(a) shows 10 concurrent requests at peak KV utilization,
-sorted by tokens held.
-LIFO targets R1 and R2---the requests with the largest KV footprints---yet
-these requests are 47\% and 34\% complete, with estimated reclamation costs
-of $\sim$1{,}800 and $\sim$1{,}050~tokens of discarded work respectively
-(red hatched bars).
-A utility-guided policy instead selects~R4, which is only~3\% complete: it
-frees 1{,}825~tokens while incurring a reclamation cost of just~62~tokens---a
-29$\times$ improvement in cost efficiency for this single victim choice.
+The practical question behind Eq.~\ref{eq:victim} is whether the active
+requests present at a real KV-pressure event are actually heterogeneous enough
+for victim selection to matter.  Figure~\ref{fig:motivation} answers yes.
+Across 250 KV-pressure events collected from a mixed-length ShareGPT run
+(rate~=~3.8\,req/s), we examine the spread of a \emph{reclamation opportunity
+score} $R_i = B_i \cdot (1 - p_i)$, where $B_i$ is the KV tokens currently
+held by candidate~$i$ (freed in full upon preemption under recompute-fallback
+semantics), and $p_i = g_i / G_i$ is the completion fraction ($g_i$~output
+tokens generated so far, $G_i$~actual final output length recorded from the
+same experiment run).  $R$ is \emph{analysis-only} and
+\emph{method-agnostic}---it references no scheduling formula and captures the
+natural intuition that a good eviction target should both free substantial KV
+space \emph{and} have invested little decode work.
 
-Panel~(b) aggregates the comparison over a target of freeing 20\% of total KV
-capacity.
-LIFO recovers 1.4$\times$ more tokens per event (by preferring larger
-requests), but at a 5.0$\times$ higher average reclamation cost.
-Coarse victim selection trades marginal extra KV recovery for a
-disproportionate cost burden, compounding tail-latency degradation at
-every subsequent scheduling step.
+The empirical answer is emphatically heterogeneous.  In 99.6\% of observed
+events, the best and worst candidates differ by at least 10$\times$ in $R$
+($\max R / \min R \geq 10$); the median spread is 128$\times$, and 94.8\% of
+events exceed 20$\times$.  This pervasive heterogeneity arises from the
+interaction of two independent dimensions: KV footprint varies widely across
+requests of different prompt lengths, and completion fraction is spread across
+the $[0, 1]$ interval as requests enter and exit at different lifecycle stages.
+Order-only heuristics that ignore both dimensions---such as LIFO, which selects
+the most recently admitted request---routinely encounter events where the
+chosen victim is far from the reclamation optimum.  The victim-selection
+problem is therefore not merely theoretical; it appears repeatedly in realistic
+traces, and exploiting this heterogeneity requires the two capabilities
+identified above: explicit per-request reclamation-cost signals and
+cross-request coordination.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig_preliminary_motivation.pdf}
-\caption{Empirical motivation (long-context trace, ShareGPT, rate=0.5\,req/s).
-  \textbf{(a)}~Per-request KV footprint (blue) and estimated reclamation cost
-  (red hatched) at a KV-pressure snapshot; 10 concurrent requests sorted by
-  KV tokens held, high$\to$low.
-  LIFO targets R1--R2 (34--47\% complete); utility-guided selects R4
-  (3\% complete, $29\times$ lower reclamation cost).
-  \textbf{(b)}~Aggregate comparison freeing 20\% of total KV capacity:
-  LIFO imposes 5.0$\times$ higher average reclamation cost per event
-  relative to utility-guided selection.}
+\includegraphics[width=\columnwidth]{figures/fig_motivation_1panel.pdf}
+\caption{Empirical evidence for the victim-selection problem on a real
+  mixed-length ShareGPT run (rate~=~3.8\,req/s).  The figure plots the CDF of
+  per-event reclamation-opportunity spread, measured as $\max R / \min R$
+  across the active victim candidates at each KV-pressure event.
+  $R_i = B_i \cdot (1 - p_i)$, where $B_i$ is KV tokens currently held
+  and $p_i = g_i / G_i$ is the completion fraction ($G_i$~actual final
+  output length from the same run)---an analysis-only, method-agnostic proxy
+  that combines capacity and progress without referencing any scheduling
+  formula.
+  Spread is pervasive: 99.6\% of 250~events exceed 10$\times$, the median
+  is 128$\times$, and 94.8\% exceed 20$\times$.  Real pressure events therefore
+  expose sharply heterogeneous reclamation opportunities, so victim selection
+  cannot be safely reduced to recency or queue order alone.}
 \label{fig:motivation}
 \end{figure}
 
@@ -647,6 +658,26 @@ internals, and compare against Vanilla SGLang (SGLang's native LRU-based
 eviction with no managed scheduling) and Random-Evict (\bidkv's adapter
 with random victim selection replacing the utility-ranked ordering).
 
+Two framework-specific adaptations were required.  First, the injection
+point is SGLang's \texttt{get\_next\_batch\_to\_run()} rather than
+vLLM's \texttt{\_schedule()} hook, reflecting each framework's scheduling
+interface.
+
+Second, SGLang's RadixAttention stores KV state in a prefix trie shared
+across requests: evicting a request releases only the \emph{private} KV
+slots in trie nodes with reference count \texttt{lock\_ref\,=\,1};
+nodes with \texttt{lock\_ref\,$>$\,1} (shared with other active requests)
+remain intact and need not be recomputed when the request is rescheduled.
+To reflect this, \bidkv computes a per-request \emph{private token count}
+$r_{\mathrm{priv}}$: once per scheduling step, a single radix-tree
+traversal collects all shared KV slot IDs~(\texttt{lock\_ref\,$>$\,1});
+for each running request, an $O(n)$ pass counts the tokens whose KV slot
+is not in the shared set.  The utility formula substitutes
+$\tokfree = r_{\mathrm{priv}}$ for the full KV footprint used under
+vLLM, and the recompute term in~$\qualdelta$ is scaled to
+$r_{\mathrm{priv}}$ rather than total tokens, since the shared prefix
+remains warm and requires no recomputation.
+
 % ============================================================
 % §6  Evaluation
 % ============================================================
@@ -949,30 +980,37 @@ intervention, and directly links victim selection to TTFT outcomes.
 \input{tables/table4_sglang}
 
 Table~\ref{tab:sglang} reports results on SGLang's RadixAttention
-engine~\cite{Zheng2024sglang} at the most stressed rate (5.7\,req/s, mixed
-workload).  The SGLang adapter applies \bidkv's complete scheduling
-policy---SJF admission ordering, pressure-gated running-queue reorder, and
-utility-ranked victim selection---mirroring the vLLM configuration without
-any modification to SGLang's internals.
+engine~\cite{Zheng2024sglang} at rate\,=\,3.8\,req/s (mixed workload,
+matching the primary vLLM evaluation rate).  The SGLang adapter applies
+\bidkv's complete scheduling policy---SJF admission ordering,
+pressure-gated running-queue reorder, and utility-ranked victim
+selection---mirroring the vLLM configuration without any modification to
+SGLang's internals.  \bidkv uses the radix-tree-aware utility formula
+described in Section~\ref{sec:impl:sglang}.
 
 \paragraph{Managed scheduling vs.~native eviction.}
-Vanilla SGLang's native LRU eviction yields 55.2\% SLO and
-TTFT~P95 of 6{,}246\,ms---reasonable throughput (3.04\,req/s) but severe
+Vanilla SGLang's native LRU eviction yields 54.4\% SLO and
+TTFT~P95 of 6{,}207\,ms---reasonable throughput (3.01\,req/s) but severe
 admission latency.  Deploying \bidkv's full policy on SGLang raises SLO to
-86.9\% ($+$31.7\,pp) and cuts TTFT~P95 to 598\,ms (10.4$\times$ reduction),
+93.2\% ($+$38.8\,pp) and cuts TTFT~P95 to 337\,ms (18.4$\times$ reduction),
 demonstrating that the policy is functional and effective on an
 architecturally distinct serving engine.
 
 \paragraph{Portability across frameworks.}
-\bidkv also outperforms Random-Evict (SLO 86.9\% vs.~85.7\%, TTFT~P95
-598 vs.~878\,ms), with notably lower run-to-run variance: Random-Evict's
-TTFT~P95 spans 460--1{,}700\,ms across three runs, while \bidkv's
-range is 475--667\,ms.  Throughput is within 0.7\% (5.53 vs.~5.57\,req/s).
+\bidkv also outperforms Random-Evict (SLO 93.2\% vs.~92.3\%, TTFT~P95
+337 vs.~386\,ms), with substantially lower run-to-run variance:
+Random-Evict's TTFT~P95 spans 328--490\,ms across three runs, while
+\bidkv's range is 328--347\,ms (19\,ms spread).
+Throughput is within 0.8\% (3.72 vs.~3.69\,req/s).
+The tighter variance reflects the radix-tree-aware formula: by substituting
+$\tokfree = r_{\mathrm{priv}}$ (true freed capacity) for total KV
+footprint, \bidkv avoids overestimating the utility of requests whose KV
+is largely shared---a systematic error that causes Random-Evict to
+occasionally select poor victims.
 The key portability result is the pattern: on both vLLM and SGLang,
-\bidkv's scheduling policy achieves the best SLO and TTFT~P95 at
-negligible throughput cost, confirming that the complete policy, including
-its integration hooks, transfers across serving frameworks without
-framework-specific tuning.
+\bidkv achieves the best SLO and TTFT~P95 at negligible throughput cost,
+confirming that the scheduling policy and its integration hooks transfer
+across serving frameworks without framework-specific tuning.
 
 % ============================================================
 % §7  Discussion and Limitations

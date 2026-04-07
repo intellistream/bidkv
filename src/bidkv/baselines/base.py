@@ -48,6 +48,19 @@ class RequestState:
     num_computed_tokens: int = 0
     max_output_tokens: int = 0
     num_preemptions: int = 0
+    private_tokens: int = 0
+    """SGLang radix-tree-aware private token count.
+
+    Number of this request's KV tokens that are NOT shared with any other
+    request in the radix tree (lock_ref == 1 nodes only).
+
+    - 0  = unknown / not available (vLLM, or SGLang without tree access)
+    - >0 = actual private token count; used by BidKV as tokens_freed
+           and as basis for recompute cost estimation.
+
+    Populated by scheduler_hook._build_running_candidates() when the
+    SGLang scheduler and radix tree are accessible.
+    """
 
 
 @dataclass(frozen=True)
