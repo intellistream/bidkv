@@ -1,0 +1,23 @@
+{
+  "LIFO (vLLM default)": {
+    "preemptions": 213,
+    "sigma_delta": 303.14,
+    "prefill_recompute": 72263,
+    "output_lost": 3511,
+    "completed": 1000
+  },
+  "Largest-First": {
+    "preemptions": 73,
+    "sigma_delta": 552.96,
+    "prefill_recompute": 204882,
+    "output_lost": 3132,
+    "completed": 1000
+  },
+  "BidKV (ours)": {
+    "preemptions": 90,
+    "sigma_delta": 103.48,
+    "prefill_recompute": 73164,
+    "output_lost": 6892,
+    "completed": 1000
+  }
+}

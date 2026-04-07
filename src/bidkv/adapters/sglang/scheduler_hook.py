@@ -651,7 +651,7 @@ def _compute_keep_score(req: Any) -> float:
     efficiency = (num_computed + 1) / remaining_output
     starvation_mult = 1.0 + num_preemptions * 2.0
 
-    return (0.1 + completion * completion) * efficiency * starvation_mult
+    return (0.1 + completion) * efficiency * starvation_mult
 
 
 def _get_max_tokens_estimate(req: Any) -> int:

@@ -35,6 +35,18 @@ def register() -> None:
     # scheduling, but with the same infrastructure overhead for fairness.
     logger.info("BidKV plugin: patching Scheduler for strategy=%s", strategy)
     _patch_scheduler_init(strategy)
+
+    # When num_gpu_blocks_override is used, relax the memory check that
+    # prevents startup when other processes consume GPU memory.  The override
+    # applies the exact block count regardless of detected available memory.
+    if os.environ.get("BIDKV_SKIP_MEM_CHECK") == "1":
+        try:
+            import vllm.v1.core.kv_cache_utils as _kv_utils
+            _kv_utils.check_enough_kv_cache_memory = lambda *_a, **_kw: None
+            logger.info("BidKV plugin: patched check_enough_kv_cache_memory (BIDKV_SKIP_MEM_CHECK=1)")
+        except ImportError:
+            pass
+
     _PATCHED = True
 
 
