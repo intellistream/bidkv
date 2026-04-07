@@ -101,6 +101,11 @@ class VLLMExperimentRunner:
         self._server_log: object | None = None  # log file handle
         self._traces: dict[str, WorkloadTrace] = {}
         self._run_deadline: float = float("inf")
+        # Bypass http_proxy for all localhost HTTP calls — proxies may cache
+        # stale 502 responses from the engine-not-ready startup phase.
+        self._http_opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        )
 
     @property
     def config(self) -> ExperimentConfig:
@@ -267,6 +272,9 @@ class VLLMExperimentRunner:
         if self._server_proc is not None:
             self._stop_server()
 
+        # Pre-start cleanup: kill any orphan GPU processes from prior runs
+        self._kill_orphan_gpu_processes()
+
         # Clear metrics file from previous run
         _METRICS_FILE.unlink(missing_ok=True)
 
@@ -305,6 +313,10 @@ class VLLMExperimentRunner:
         deadline = time.monotonic() + self._config.server_startup_timeout_s
         healthy = False
 
+        # Bypass http_proxy for localhost health checks — proxies may cache
+        # 502 responses from the engine-not-ready phase indefinitely.
+
+        health_attempts = 0
         while time.monotonic() < deadline:
             if self._server_proc.poll() is not None:
                 # Server process died — read tail of log file
@@ -317,11 +329,19 @@ class VLLMExperimentRunner:
                 )
             try:
                 req = urllib.request.Request(health_url, method="GET")
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with self._http_opener.open(req, timeout=5) as resp:
                     if resp.status == 200:
                         healthy = True
                         break
-            except (urllib.error.URLError, OSError):
+            except (urllib.error.URLError, OSError) as exc:
+                health_attempts += 1
+                if health_attempts % 30 == 1:  # Log every ~60s
+                    logger.warning(
+                        "Health check attempt #%d failed (url=%s): %s",
+                        health_attempts,
+                        health_url,
+                        exc,
+                    )
                 pass
             time.sleep(2)
 
@@ -388,7 +408,7 @@ class VLLMExperimentRunner:
                 with open(f"/proc/{entry}/cmdline") as f:
                     cmd = f.read().replace("\0", " ")[:150]
                 # Only kill bidkv/vllm/EngineCore/resource_tracker processes
-                if any(kw in cmd for kw in ("bidkv", "vllm", "EngineCore", "resource_tracker")):
+                if any(kw in cmd for kw in ("bidkv", "vllm", "EngineCore", "resource_tracker", "spawn_main", "multiprocessing.spawn")):
                     os.kill(pid_i, signal.SIGKILL)
                     killed.append(f"PID {pid_i}: {cmd[:80]}")
             except (OSError, ProcessLookupError):
@@ -400,9 +420,15 @@ class VLLMExperimentRunner:
                 "; ".join(killed),
             )
 
-    def _wait_gpu_release(self, timeout_s: float = 30) -> None:
-        """Wait until GPU memory drops below 500 MiB."""
+    def _wait_gpu_release(self, timeout_s: float = 60) -> None:
+        """Wait until GPU memory drops to near-baseline level.
+
+        Measures current GPU usage as the first sample, then waits for it
+        to stabilize (no further decrease over two consecutive checks).
+        This handles any host-process baseline (e.g. 1.7 GiB) automatically.
+        """
         deadline = time.monotonic() + timeout_s
+        prev_used = None
         while time.monotonic() < deadline:
             try:
                 out = subprocess.check_output(
@@ -411,13 +437,17 @@ class VLLMExperimentRunner:
                     timeout=5,
                 ).strip()
                 used_mib = int(out.split("\n")[0].strip())
-                if used_mib < 500:
+                # If usage is stable (within 200 MiB of previous reading),
+                # the server's GPU memory has been fully released.
+                if prev_used is not None and abs(used_mib - prev_used) < 200:
+                    logger.info("GPU memory stabilized at %d MiB", used_mib)
                     return
-                logger.debug("GPU still %d MiB used, waiting...", used_mib)
+                prev_used = used_mib
+                logger.debug("GPU usage %d MiB, waiting to stabilize...", used_mib)
             except (subprocess.SubprocessError, ValueError, OSError):
                 pass
-            time.sleep(2)
-        logger.warning("GPU memory not fully released after %.0fs", timeout_s)
+            time.sleep(3)
+        logger.warning("GPU memory not stabilized after %.0fs (last=%s MiB)", timeout_s, prev_used)
 
     def _warmup(self, strategy: str) -> None:
         """Send warmup requests to the server."""
@@ -440,7 +470,7 @@ class VLLMExperimentRunner:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with self._http_opener.open(req, timeout=60) as resp:
                     resp.read()
             except Exception as exc:
                 logger.warning("Warmup request %d failed: %s", i, exc)
@@ -711,7 +741,7 @@ class VLLMExperimentRunner:
         effective_timeout = min(self._config.request_timeout_s, remaining)
 
         try:
-            with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
+            with self._http_opener.open(req, timeout=effective_timeout) as resp:
                 first_chunk_received = False
                 for raw_line in resp:
                     line = raw_line.decode("utf-8").strip()

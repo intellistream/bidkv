@@ -16,8 +16,8 @@ Mode A 语义（request-level preemption）
 - recompute_norm = prompt_tokens / 256（prompt 长度归一化）
   prefill 重算代价正比于 prompt 长度，长 prompt 请求 δ 增大 → U 降低 →
   BidKV 主动回避高重算代价的驱逐决策。
-- late_penalty = completion² × 2（接近完成的请求获得保护）
-  completion = output_tokens / max_output_tokens；接近完成时 δ 二次增大，
+- late_penalty = completion × 2（接近完成的请求获得保护）
+  completion = output_tokens / max_output_tokens；接近完成时 δ 线性增大，
   保护"很快就能自然释放 KV"的请求不被意外驱逐。
 - starvation = num_preemptions × 0.5（anti-starvation）
   被多次 preempt 的请求 δ 递增，防止 cascading 连续驱逐同一请求。
@@ -28,6 +28,7 @@ Fallback（num_computed_tokens 不可用时）：
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
@@ -35,6 +36,18 @@ from bidkv.pool import BidPoolManager
 from bidkv.protocol.bid import CompressionBid, make_bid_id
 from bidkv.scoring import PositionalScoring, ScoringStrategy
 from bidkv.solver import GreedyBidSolver, SolverConfig
+
+# ---------------------------------------------------------------------------
+# Sensitivity analysis: environment variable overrides for δ parameters.
+# These allow running sensitivity experiments without code changes.
+# Default values match the published formula.
+# ---------------------------------------------------------------------------
+_COMPLETION_WEIGHT = float(os.environ.get("BIDKV_COMPLETION_WEIGHT", "2.0"))
+_STARVATION_WEIGHT = float(os.environ.get("BIDKV_STARVATION_WEIGHT", "0.5"))
+_RECOMPUTE_DIV = float(os.environ.get("BIDKV_RECOMPUTE_DIV", "256.0"))
+_RECOMPUTE_FLOOR = float(os.environ.get("BIDKV_RECOMPUTE_FLOOR", "0.5"))
+# "default" = normal formula, "freed-only" = δ=1 constant, "no-recompute" = recompute=1
+_DELTA_MODE = os.environ.get("BIDKV_DELTA_MODE", "default")
 
 
 class BidKVStrategy(BaselineStrategy):
@@ -82,7 +95,7 @@ class BidKVStrategy(BaselineStrategy):
 
         - output_tokens = num_computed - num_prompt（仅 decode phase KV）
         - recompute_norm = prompt_tokens / 256（重算代价归一化）
-        - late_penalty = completion² × 2（保护接近完成的请求）
+        - late_penalty = completion × 2（保护接近完成的请求）
         - starvation = num_preemptions × 0.5（防止 cascading 驱逐）
 
         当 num_computed_tokens == 0（信息不可用）时，回退到简化公式：
@@ -126,23 +139,32 @@ class BidKVStrategy(BaselineStrategy):
                 # ----------------------------------------------------------
                 tokens_freed = output_tokens
 
-                # Recompute cost: proportional to prompt length.
-                # A 512-token prompt costs 2× the re-prefill of a 256-token one.
-                recompute_norm = max(0.5, req.num_prompt_tokens / 256.0)
+                if _DELTA_MODE == "freed-only":
+                    # Ablation: δ = 1.0 constant → U = freed / (1 + ε)
+                    quality_delta = 1.0
+                    recompute_norm = 1.0
+                    completion = 0.0
+                    late_penalty = 0.0
+                    starvation_penalty = 0.0
+                else:
+                    # Recompute cost: proportional to prompt length.
+                    if _DELTA_MODE == "no-recompute":
+                        recompute_norm = 1.0
+                    else:
+                        recompute_norm = max(
+                            _RECOMPUTE_FLOOR, req.num_prompt_tokens / _RECOMPUTE_DIV
+                        )
 
-                # Near-completion penalty: protect almost-done requests.
-                # They will free KV naturally very soon; evicting them now
-                # wastes their accumulated decoding work.
-                completion = 0.0
-                if req.max_output_tokens > 0:
-                    completion = min(1.0, output_tokens / req.max_output_tokens)
-                late_penalty = completion * completion * 2.0
+                    # Near-completion penalty: protect almost-done requests.
+                    completion = 0.0
+                    if req.max_output_tokens > 0:
+                        completion = min(1.0, output_tokens / req.max_output_tokens)
+                    late_penalty = completion * _COMPLETION_WEIGHT
 
-                # Anti-starvation: previously preempted requests are penalized
-                # to prevent cascading evictions of the same request.
-                starvation_penalty = req.num_preemptions * 0.5
+                    # Anti-starvation: previously preempted requests are penalized
+                    starvation_penalty = req.num_preemptions * _STARVATION_WEIGHT
 
-                quality_delta = max(0.1, recompute_norm + late_penalty + starvation_penalty)
+                    quality_delta = max(0.1, recompute_norm + late_penalty + starvation_penalty)
 
                 metadata: dict = {
                     "output_tokens": output_tokens,

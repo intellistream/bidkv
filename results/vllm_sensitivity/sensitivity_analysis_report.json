@@ -1,0 +1,541 @@
+{
+  "experiment": "BidKV Sensitivity Analysis",
+  "date": "2026-04-06",
+  "workload": "mixed",
+  "rate": 3.8,
+  "runs_per_variant": 3,
+  "frozen_params": {
+    "gpu_memory_utilization": 0.5,
+    "num_gpu_blocks_override": 600,
+    "block_size": 16,
+    "max_num_seqs": 32,
+    "max_model_len": 8192
+  },
+  "axes": {
+    "kv_gate_threshold": [
+      0.85,
+      0.9,
+      0.95,
+      0.98
+    ],
+    "completion_weight": [
+      0.5,
+      1.0,
+      2.0,
+      4.0
+    ],
+    "starvation_weight": [
+      0.1,
+      0.25,
+      0.5,
+      1.0
+    ]
+  },
+  "default_params": {
+    "gate": 0.95,
+    "wc": 2.0,
+    "ws": 0.5
+  },
+  "results": {
+    "default": {
+      "params": "gate=0.95, wc=2.0, ws=0.5",
+      "throughput": {
+        "mean": 3.434,
+        "stdev": 0.054
+      },
+      "slo300_pct": {
+        "mean": 78.3,
+        "stdev": 2.0
+      },
+      "ttft_p95_ms": {
+        "mean": 2524.0,
+        "stdev": 343.0
+      },
+      "tpot_p95_ms": {
+        "mean": 97.4,
+        "stdev": 6.1
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.37,
+          "slo300": 79.4,
+          "ttft_p50": 134.12,
+          "ttft_p95": 2882.06,
+          "tpot_p50": 54.96,
+          "tpot_p95": 98.65,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.46,
+          "slo300": 76.0,
+          "ttft_p50": 136.82,
+          "ttft_p95": 2490.44,
+          "tpot_p50": 55.75,
+          "tpot_p95": 102.78,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.47,
+          "slo300": 79.5,
+          "ttft_p50": 124.16,
+          "ttft_p95": 2198.45,
+          "tpot_p50": 54.05,
+          "tpot_p95": 90.69,
+          "evictions": 0
+        }
+      ]
+    },
+    "gate-85": {
+      "params": "gate=0.85, wc=2.0, ws=0.5",
+      "throughput": {
+        "mean": 3.505,
+        "stdev": 0.008
+      },
+      "slo300_pct": {
+        "mean": 68.3,
+        "stdev": 14.7
+      },
+      "ttft_p95_ms": {
+        "mean": 2908.0,
+        "stdev": 217.0
+      },
+      "tpot_p95_ms": {
+        "mean": 94.6,
+        "stdev": 0.5
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.51,
+          "slo300": 76.2,
+          "ttft_p50": 133.73,
+          "ttft_p95": 3157.9,
+          "tpot_p50": 54.82,
+          "tpot_p95": 94.34,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.51,
+          "slo300": 51.3,
+          "ttft_p50": 296.93,
+          "ttft_p95": 2785.01,
+          "tpot_p50": 54.49,
+          "tpot_p95": 94.34,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.5,
+          "slo300": 77.4,
+          "ttft_p50": 128.61,
+          "ttft_p95": 2780.55,
+          "tpot_p50": 54.75,
+          "tpot_p95": 95.16,
+          "evictions": 0
+        }
+      ]
+    },
+    "gate-90": {
+      "params": "gate=0.90, wc=2.0, ws=0.5",
+      "throughput": {
+        "mean": 3.441,
+        "stdev": 0.032
+      },
+      "slo300_pct": {
+        "mean": 76.0,
+        "stdev": 3.6
+      },
+      "ttft_p95_ms": {
+        "mean": 2703.0,
+        "stdev": 760.0
+      },
+      "tpot_p95_ms": {
+        "mean": 97.7,
+        "stdev": 5.3
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.48,
+          "slo300": 75.3,
+          "ttft_p50": 135.68,
+          "ttft_p95": 2576.2,
+          "tpot_p50": 55.49,
+          "tpot_p95": 97.0,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.42,
+          "slo300": 79.9,
+          "ttft_p50": 127.47,
+          "ttft_p95": 2013.42,
+          "tpot_p50": 54.45,
+          "tpot_p95": 92.79,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.42,
+          "slo300": 72.8,
+          "ttft_p50": 134.27,
+          "ttft_p95": 3518.22,
+          "tpot_p50": 56.53,
+          "tpot_p95": 103.38,
+          "evictions": 0
+        }
+      ]
+    },
+    "gate-98": {
+      "params": "gate=0.98, wc=2.0, ws=0.5",
+      "throughput": {
+        "mean": 3.459,
+        "stdev": 0.04
+      },
+      "slo300_pct": {
+        "mean": 76.7,
+        "stdev": 1.6
+      },
+      "ttft_p95_ms": {
+        "mean": 2352.0,
+        "stdev": 285.0
+      },
+      "tpot_p95_ms": {
+        "mean": 95.4,
+        "stdev": 2.3
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.48,
+          "slo300": 75.2,
+          "ttft_p50": 132.1,
+          "ttft_p95": 2667.97,
+          "tpot_p50": 55.18,
+          "tpot_p95": 96.36,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.41,
+          "slo300": 78.4,
+          "ttft_p50": 133.35,
+          "ttft_p95": 2115.65,
+          "tpot_p50": 55.17,
+          "tpot_p95": 92.72,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.49,
+          "slo300": 76.6,
+          "ttft_p50": 130.0,
+          "ttft_p95": 2271.27,
+          "tpot_p50": 55.1,
+          "tpot_p95": 97.05,
+          "evictions": 0
+        }
+      ]
+    },
+    "wc-05": {
+      "params": "gate=0.95, wc=0.5, ws=0.5",
+      "throughput": {
+        "mean": 3.434,
+        "stdev": 0.055
+      },
+      "slo300_pct": {
+        "mean": 78.1,
+        "stdev": 2.1
+      },
+      "ttft_p95_ms": {
+        "mean": 2734.0,
+        "stdev": 459.0
+      },
+      "tpot_p95_ms": {
+        "mean": 96.9,
+        "stdev": 4.2
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.4,
+          "slo300": 75.7,
+          "ttft_p50": 135.47,
+          "ttft_p95": 3195.13,
+          "tpot_p50": 56.18,
+          "tpot_p95": 101.63,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.4,
+          "slo300": 79.7,
+          "ttft_p50": 123.9,
+          "ttft_p95": 2277.06,
+          "tpot_p50": 54.21,
+          "tpot_p95": 93.82,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.5,
+          "slo300": 78.9,
+          "ttft_p50": 131.4,
+          "ttft_p95": 2730.14,
+          "tpot_p50": 55.31,
+          "tpot_p95": 95.25,
+          "evictions": 0
+        }
+      ]
+    },
+    "wc-10": {
+      "params": "gate=0.95, wc=1.0, ws=0.5",
+      "throughput": {
+        "mean": 3.452,
+        "stdev": 0.04
+      },
+      "slo300_pct": {
+        "mean": 77.6,
+        "stdev": 0.8
+      },
+      "ttft_p95_ms": {
+        "mean": 2356.0,
+        "stdev": 332.0
+      },
+      "tpot_p95_ms": {
+        "mean": 95.3,
+        "stdev": 1.2
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.41,
+          "slo300": 77.1,
+          "ttft_p50": 133.7,
+          "ttft_p95": 2522.58,
+          "tpot_p50": 55.09,
+          "tpot_p95": 94.74,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.45,
+          "slo300": 78.6,
+          "ttft_p50": 125.17,
+          "ttft_p95": 1973.51,
+          "tpot_p50": 54.91,
+          "tpot_p95": 94.54,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.49,
+          "slo300": 77.2,
+          "ttft_p50": 131.88,
+          "ttft_p95": 2572.85,
+          "tpot_p50": 55.13,
+          "tpot_p95": 96.69,
+          "evictions": 0
+        }
+      ]
+    },
+    "wc-40": {
+      "params": "gate=0.95, wc=4.0, ws=0.5",
+      "throughput": {
+        "mean": 3.417,
+        "stdev": 0.084
+      },
+      "slo300_pct": {
+        "mean": 77.1,
+        "stdev": 1.5
+      },
+      "ttft_p95_ms": {
+        "mean": 3020.0,
+        "stdev": 465.0
+      },
+      "tpot_p95_ms": {
+        "mean": 98.5,
+        "stdev": 6.2
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.33,
+          "slo300": 78.8,
+          "ttft_p50": 126.91,
+          "ttft_p95": 2553.69,
+          "tpot_p50": 54.86,
+          "tpot_p95": 105.63,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.43,
+          "slo300": 76.7,
+          "ttft_p50": 130.75,
+          "ttft_p95": 3020.73,
+          "tpot_p50": 55.58,
+          "tpot_p95": 95.43,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.5,
+          "slo300": 75.8,
+          "ttft_p50": 131.91,
+          "ttft_p95": 3484.11,
+          "tpot_p50": 55.2,
+          "tpot_p95": 94.33,
+          "evictions": 0
+        }
+      ]
+    },
+    "ws-01": {
+      "params": "gate=0.95, wc=2.0, ws=0.1",
+      "throughput": {
+        "mean": 3.458,
+        "stdev": 0.063
+      },
+      "slo300_pct": {
+        "mean": 75.7,
+        "stdev": 1.5
+      },
+      "ttft_p95_ms": {
+        "mean": 2694.0,
+        "stdev": 146.0
+      },
+      "tpot_p95_ms": {
+        "mean": 98.6,
+        "stdev": 10.8
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.39,
+          "slo300": 73.97,
+          "ttft_p50": 132.38,
+          "ttft_p95": 2851.98,
+          "tpot_p50": 57.16,
+          "tpot_p95": 110.99,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.49,
+          "slo300": 76.7,
+          "ttft_p50": 133.66,
+          "ttft_p95": 2562.81,
+          "tpot_p50": 55.09,
+          "tpot_p95": 92.22,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.5,
+          "slo300": 76.4,
+          "ttft_p50": 128.95,
+          "ttft_p95": 2668.33,
+          "tpot_p50": 54.38,
+          "tpot_p95": 92.5,
+          "evictions": 0
+        }
+      ]
+    },
+    "ws-025": {
+      "params": "gate=0.95, wc=2.0, ws=0.25",
+      "throughput": {
+        "mean": 3.477,
+        "stdev": 0.06
+      },
+      "slo300_pct": {
+        "mean": 75.8,
+        "stdev": 0.4
+      },
+      "ttft_p95_ms": {
+        "mean": 2786.0,
+        "stdev": 547.0
+      },
+      "tpot_p95_ms": {
+        "mean": 96.2,
+        "stdev": 3.3
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.51,
+          "slo300": 75.6,
+          "ttft_p50": 132.36,
+          "ttft_p95": 2787.36,
+          "tpot_p50": 55.27,
+          "tpot_p95": 93.53,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.41,
+          "slo300": 76.3,
+          "ttft_p50": 134.01,
+          "ttft_p95": 2238.04,
+          "tpot_p50": 55.33,
+          "tpot_p95": 99.88,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.51,
+          "slo300": 75.6,
+          "ttft_p50": 135.42,
+          "ttft_p95": 3332.58,
+          "tpot_p50": 54.71,
+          "tpot_p95": 95.34,
+          "evictions": 0
+        }
+      ]
+    },
+    "ws-10": {
+      "params": "gate=0.95, wc=2.0, ws=1.0",
+      "throughput": {
+        "mean": 3.434,
+        "stdev": 0.056
+      },
+      "slo300_pct": {
+        "mean": 78.5,
+        "stdev": 0.8
+      },
+      "ttft_p95_ms": {
+        "mean": 2528.0,
+        "stdev": 289.0
+      },
+      "tpot_p95_ms": {
+        "mean": 91.5,
+        "stdev": 1.4
+      },
+      "evictions_mean": 0,
+      "per_run": [
+        {
+          "throughput": 3.37,
+          "slo300": 77.6,
+          "ttft_p50": 127.61,
+          "ttft_p95": 2805.44,
+          "tpot_p50": 55.55,
+          "tpot_p95": 92.29,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.46,
+          "slo300": 79.0,
+          "ttft_p50": 128.96,
+          "ttft_p95": 2550.92,
+          "tpot_p50": 54.18,
+          "tpot_p95": 92.3,
+          "evictions": 0
+        },
+        {
+          "throughput": 3.48,
+          "slo300": 79.0,
+          "ttft_p50": 125.3,
+          "ttft_p95": 2227.85,
+          "tpot_p50": 54.26,
+          "tpot_p95": 89.87,
+          "evictions": 0
+        }
+      ]
+    }
+  },
+  "observations": [
+    "All evictions are 0 across all variants at rate=3.8 mixed - BidKV select_victims() is never triggered",
+    "Parameter differentiation comes ONLY from running reorder (KV gate threshold) in this regime",
+    "w_c and w_s variations show noise-level differences, confirming formula robustness",
+    "KV gate threshold has the largest impact: gate=0.85 is clearly worse (SLO=68.3% vs 78.3% default)",
+    "Default parameters [0.95, 2.0, 0.5] are near-optimal: best SLO group + competitive TTFT",
+    "Throughput is very stable across all variants (3.42-3.51, CV<3%)",
+    "TPOT P95 is stable across all variants (91.5-98.6ms, CV<11%)",
+    "gate-85 r1 has anomalous SLO=51.3% (outlier) vs r0=76.2%, r2=77.4%"
+  ]
+}

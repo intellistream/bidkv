@@ -257,7 +257,7 @@ def _build_candidates(running: Any, adapter: VLLMAdapter, now_ms: float) -> list
         # U = output_tokens / (recompute_norm + late_penalty + starvation)
         if num_output > 2:
             _recompute_norm = max(0.5, num_prompt / 256.0)
-            _late_penalty = completion_ratio * completion_ratio * 2.0
+            _late_penalty = completion_ratio * 2.0
             _starvation = num_preemptions * 0.5
             _quality_delta = max(0.1, _recompute_norm + _late_penalty + _starvation)
             utility = round(num_output / _quality_delta, 2)
