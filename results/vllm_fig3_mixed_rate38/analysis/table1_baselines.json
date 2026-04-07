@@ -1,0 +1,68 @@
+[
+  {
+    "strategy": "preempt-evict",
+    "description": "Framework default preemption (no compression)",
+    "has_scoring": false,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Lower bound — zero compression baseline",
+    "avg_slo_attainment_rate": 0.8226666666666667,
+    "avg_throughput_rps": 3.4413418228279755
+  },
+  {
+    "strategy": "static-random",
+    "description": "Random victim selection with fixed compression ratio",
+    "has_scoring": false,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Control group — isolates information value",
+    "avg_slo_attainment_rate": 0.944,
+    "avg_throughput_rps": 3.6029774771815504
+  },
+  {
+    "strategy": "largest-first",
+    "description": "Capacity-greedy victim selection (evicts largest KV)",
+    "has_scoring": true,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Isolates bid mechanism contribution from scoring",
+    "avg_slo_attainment_rate": 0.9236666666666666,
+    "avg_throughput_rps": 3.3624820532428097
+  },
+  {
+    "strategy": "uniform",
+    "description": "Equal compression ratio across all requests",
+    "has_scoring": false,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Isolates differentiated compression value"
+  },
+  {
+    "strategy": "preempt-evict-sjf",
+    "description": "SJF admission + LIFO eviction (ablation baseline)",
+    "has_scoring": false,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Isolates SJF admission contribution from eviction",
+    "avg_slo_attainment_rate": 0.879,
+    "avg_throughput_rps": 3.1262340325894815
+  },
+  {
+    "strategy": "slack-aware",
+    "description": "SLO deadline-aware victim selection",
+    "has_scoring": false,
+    "has_bid": false,
+    "has_solver": false,
+    "design_rationale": "Quality-unaware scheduling baseline"
+  },
+  {
+    "strategy": "bidkv",
+    "description": "Full BidKV pipeline (positional scoring + bid + solver)",
+    "has_scoring": true,
+    "has_bid": true,
+    "has_solver": true,
+    "design_rationale": "Complete system with user-explicit quality preference",
+    "avg_slo_attainment_rate": 0.9103333333333334,
+    "avg_throughput_rps": 3.514613593659419
+  }
+]

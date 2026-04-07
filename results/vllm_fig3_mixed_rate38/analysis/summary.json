@@ -1,0 +1,244 @@
+{
+  "aggregations": [
+    {
+      "strategy": "bidkv",
+      "workload": "mixed",
+      "request_rate": 3.8,
+      "runs": 3,
+      "throughput_rps": {
+        "mean": 3.514613593659419,
+        "ci95": 0.1426895134027595
+      },
+      "ttft_ms_p50": {
+        "mean": 114.10923992904524,
+        "ci95": 4.258287485461721
+      },
+      "ttft_ms_p99": {
+        "mean": 6014.666427392513,
+        "ci95": 1949.5462975443882
+      },
+      "tpot_ms_p50": {
+        "mean": 52.36586011124415,
+        "ci95": 2.6768082235089925
+      },
+      "tpot_ms_p99": {
+        "mean": 178.05690436776806,
+        "ci95": 109.62494761763651
+      },
+      "e2e_latency_ms_p50": {
+        "mean": 8478.092346340418,
+        "ci95": 331.0338568506895
+      },
+      "e2e_latency_ms_p99": {
+        "mean": 25082.05493733597,
+        "ci95": 18423.89660734839
+      },
+      "normalized_latency_ms_per_token": {
+        "mean": 63.0220174094077,
+        "ci95": 8.82254424220572
+      },
+      "slo_attainment_rate": {
+        "mean": 0.9103333333333334,
+        "ci95": 0.04728951537896938
+      },
+      "eviction_coverage": 0.03333333333333333,
+      "total_evictions": 33.333333333333336,
+      "total_tokens_freed": 12811.333333333334,
+      "pressure_events": 0.0,
+      "total_all_preemptions": 323.3333333333333,
+      "total_all_tokens_freed": 174248.0
+    },
+    {
+      "strategy": "largest-first",
+      "workload": "mixed",
+      "request_rate": 3.8,
+      "runs": 3,
+      "throughput_rps": {
+        "mean": 3.3624820532428097,
+        "ci95": 0.024212108193295355
+      },
+      "ttft_ms_p50": {
+        "mean": 112.06936029096444,
+        "ci95": 4.68388116526146
+      },
+      "ttft_ms_p99": {
+        "mean": 4125.347072724253,
+        "ci95": 1803.1165643823315
+      },
+      "tpot_ms_p50": {
+        "mean": 58.246299338313825,
+        "ci95": 2.176717861169741
+      },
+      "tpot_ms_p99": {
+        "mean": 191.495220434127,
+        "ci95": 106.24781037029642
+      },
+      "e2e_latency_ms_p50": {
+        "mean": 8797.350850344324,
+        "ci95": 103.96449199150054
+      },
+      "e2e_latency_ms_p99": {
+        "mean": 27038.404368329793,
+        "ci95": 9899.280994777726
+      },
+      "normalized_latency_ms_per_token": {
+        "mean": 68.2196527900453,
+        "ci95": 1.5681510758689605
+      },
+      "slo_attainment_rate": {
+        "mean": 0.9236666666666666,
+        "ci95": 0.007589778594340629
+      },
+      "eviction_coverage": 0.11233333333333334,
+      "total_evictions": 112.33333333333333,
+      "total_tokens_freed": 75575.0,
+      "pressure_events": 0.0,
+      "total_all_preemptions": 295.6666666666667,
+      "total_all_tokens_freed": 325296.3333333333
+    },
+    {
+      "strategy": "preempt-evict",
+      "workload": "mixed",
+      "request_rate": 3.8,
+      "runs": 3,
+      "throughput_rps": {
+        "mean": 3.4413418228279755,
+        "ci95": 0.13161131659447442
+      },
+      "ttft_ms_p50": {
+        "mean": 121.26389906431238,
+        "ci95": 8.393144842319334
+      },
+      "ttft_ms_p99": {
+        "mean": 13916.132539200285,
+        "ci95": 3228.243359143318
+      },
+      "tpot_ms_p50": {
+        "mean": 50.96521055557818,
+        "ci95": 0.4875910507282684
+      },
+      "tpot_ms_p99": {
+        "mean": 156.81534532522963,
+        "ci95": 30.478325404375013
+      },
+      "e2e_latency_ms_p50": {
+        "mean": 8585.021091314653,
+        "ci95": 90.6764320508546
+      },
+      "e2e_latency_ms_p99": {
+        "mean": 22666.848765686154,
+        "ci95": 4137.442848816986
+      },
+      "normalized_latency_ms_per_token": {
+        "mean": 66.66891776595422,
+        "ci95": 3.392120839704699
+      },
+      "slo_attainment_rate": {
+        "mean": 0.8226666666666667,
+        "ci95": 0.03427426462295633
+      },
+      "eviction_coverage": 0.0,
+      "total_evictions": 0.0,
+      "total_tokens_freed": 0.0,
+      "pressure_events": 0.0,
+      "total_all_preemptions": 247.33333333333334,
+      "total_all_tokens_freed": 196341.66666666666
+    },
+    {
+      "strategy": "preempt-evict-sjf",
+      "workload": "mixed",
+      "request_rate": 3.8,
+      "runs": 3,
+      "throughput_rps": {
+        "mean": 3.1262340325894815,
+        "ci95": 0.5661684238336121
+      },
+      "ttft_ms_p50": {
+        "mean": 111.57010371486346,
+        "ci95": 3.6198924628795357
+      },
+      "ttft_ms_p99": {
+        "mean": 3550.954198697582,
+        "ci95": 1164.5279566812017
+      },
+      "tpot_ms_p50": {
+        "mean": 55.033221553153886,
+        "ci95": 2.9250455602676557
+      },
+      "tpot_ms_p99": {
+        "mean": 223.83208326676814,
+        "ci95": 176.4355828203923
+      },
+      "e2e_latency_ms_p50": {
+        "mean": 8680.630311059454,
+        "ci95": 222.14014857783934
+      },
+      "e2e_latency_ms_p99": {
+        "mean": 28433.969732296344,
+        "ci95": 23066.087812241793
+      },
+      "normalized_latency_ms_per_token": {
+        "mean": 70.44402548867,
+        "ci95": 16.337426274545855
+      },
+      "slo_attainment_rate": {
+        "mean": 0.879,
+        "ci95": 0.11885942228952666
+      },
+      "eviction_coverage": 0.0,
+      "total_evictions": 0.0,
+      "total_tokens_freed": 0.0,
+      "pressure_events": 0.0,
+      "total_all_preemptions": 336.3333333333333,
+      "total_all_tokens_freed": 365573.3333333333
+    },
+    {
+      "strategy": "static-random",
+      "workload": "mixed",
+      "request_rate": 3.8,
+      "runs": 3,
+      "throughput_rps": {
+        "mean": 3.6029774771815504,
+        "ci95": 0.06275330469149665
+      },
+      "ttft_ms_p50": {
+        "mean": 113.6363772675395,
+        "ci95": 4.639985390634903
+      },
+      "ttft_ms_p99": {
+        "mean": 4710.859342322995,
+        "ci95": 1045.9988708125936
+      },
+      "tpot_ms_p50": {
+        "mean": 52.40523815238284,
+        "ci95": 1.8350892359149473
+      },
+      "tpot_ms_p99": {
+        "mean": 124.26377906114767,
+        "ci95": 14.771524848352952
+      },
+      "e2e_latency_ms_p50": {
+        "mean": 8362.915637359643,
+        "ci95": 92.76632267616803
+      },
+      "e2e_latency_ms_p99": {
+        "mean": 16897.015097628657,
+        "ci95": 1688.507715890968
+      },
+      "normalized_latency_ms_per_token": {
+        "mean": 59.464035044692345,
+        "ci95": 2.1479678560952733
+      },
+      "slo_attainment_rate": {
+        "mean": 0.944,
+        "ci95": 0.002484338208322962
+      },
+      "eviction_coverage": 0.08666666666666667,
+      "total_evictions": 86.66666666666667,
+      "total_tokens_freed": 22956.666666666668,
+      "pressure_events": 0.0,
+      "total_all_preemptions": 328.6666666666667,
+      "total_all_tokens_freed": 88483.66666666667
+    }
+  ]
+}

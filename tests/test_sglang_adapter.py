@@ -2,7 +2,6 @@
 
 测试范围：
 - SGLangAdapter 创建与配置
-- 压力态下 BidKV 压缩周期（try_compress）
 - 共享前缀保护逻辑
 - Kill switch 热切换
 - Feature OFF 零开销路径
@@ -109,82 +108,8 @@ class TestSGLangAdapterCreation:
 class TestFeatureOff:
     """Feature OFF 时所有操作为 no-op。"""
 
-    def test_try_compress_returns_zero(self, inactive_adapter: SGLangAdapter) -> None:
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            assert inactive_adapter.try_compress() == 0
-
-    def test_execute_compression_returns_zero(self, inactive_adapter: SGLangAdapter) -> None:
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            assert inactive_adapter.execute_compression("req-1", 100) == 0
-
     def test_get_kv_stats_no_scheduler(self, inactive_adapter: SGLangAdapter) -> None:
         assert inactive_adapter.get_kv_stats() == (0, 0)
-
-
-# ===========================================================================
-# Test: 压力态下 BidKV 压缩周期
-# ===========================================================================
-
-
-class TestPressureCompression:
-    """压力态下触发 bid-based 压缩的完整周期。"""
-
-    def test_no_pressure_no_compression(self, active_adapter: SGLangAdapter) -> None:
-        """无压力时 try_compress 返回 0。"""
-        # KV stats 为 (0, 0)（无 scheduler），不触发压力
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            result = active_adapter.try_compress()
-        assert result == 0
-
-    def test_pressure_triggers_bid_generation(self, active_adapter: SGLangAdapter) -> None:
-        """压力态下应生成 bids 并尝试求解。"""
-        # 手动设置压力状态
-        active_adapter.pressure_detector.update_stats(used_tokens=9000, max_tokens=10000)
-        assert active_adapter.pressure_detector.is_under_pressure()
-
-        # 追踪一个请求
-        token_ids = list(range(100))
-        active_adapter.track_request("req-1", token_ids)
-
-        # 刷新 bids（内部方法）
-        active_adapter._refresh_bids()
-
-        # 验证 bids 已提交到 pool
-        pool_snapshot = active_adapter.pool_manager.get_pool_snapshot()
-        assert len(pool_snapshot.bids) > 0
-        assert all(b.request_id == "req-1" for b in pool_snapshot.bids)
-
-    def test_full_compression_cycle_without_framework(self, active_adapter: SGLangAdapter) -> None:
-        """完整压缩周期（无框架层执行压缩）。
-
-        验证 BidKV pipeline 的正确性：
-        pressure detection → bid generation → solver → acceptance。
-        """
-        # 追踪请求
-        token_ids = list(range(200))
-        active_adapter.track_request("req-1", token_ids)
-        active_adapter.track_request("req-2", list(range(150)))
-
-        # 模拟压力态
-        active_adapter.pressure_detector.update_stats(used_tokens=8800, max_tokens=10000)
-
-        # 刷新 bids
-        active_adapter._refresh_bids()
-
-        # 确认 pool 有 bids
-        snapshot = active_adapter.pool_manager.get_pool_snapshot()
-        assert len(snapshot.bids) > 0
-
-        # Solver 求解
-        tokens_needed = active_adapter.pressure_detector.needed_tokens()
-        assert tokens_needed > 0
-
-        acceptance = active_adapter.solver.solve(
-            snapshot, tokens_needed, decision_reason="test_pressure"
-        )
-        # Solver 应该能找到可接受的 bids
-        assert len(acceptance.accepted_bid_ids) > 0
-        assert acceptance.total_tokens_freed > 0
 
 
 # ===========================================================================
@@ -200,24 +125,6 @@ class TestSharedPrefixProtection:
         shared = {0, 1, 2, 3, 4}
         active_adapter.track_request("req-1", list(range(20)), shared_positions=shared)
         assert active_adapter.get_shared_positions("req-1") == shared
-
-    def test_shared_tokens_excluded_from_compression(self, active_adapter: SGLangAdapter) -> None:
-        """共享 token 不应出现在压缩候选中。"""
-        token_ids = list(range(20))
-        shared = {0, 1, 2, 3, 4}  # 前 5 个 token 共享
-        active_adapter.track_request("req-1", token_ids, shared_positions=shared)
-
-        # 更新 Positional scoring（给所有 token 评分）
-        attention = [0.1] * 20
-        active_adapter.scoring.update_from_decode_step(attention)
-
-        # 执行压缩（无 scheduler，不会实际调用框架 API）
-        # execute_compression 内部会跳过共享位置
-        # 因为没有 scheduler，实际释放为 0，但逻辑路径正确
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            freed = active_adapter.execute_compression("req-1", 10)
-        # 没有 scheduler 所以返回 0 是正常的
-        assert freed == 0
 
     def test_update_shared_positions(self, active_adapter: SGLangAdapter) -> None:
         """共享位置可动态更新。"""
@@ -244,8 +151,6 @@ class TestKillSwitch:
 
         assert not active_adapter.config.is_active
         assert not active_adapter.pool_manager.is_active
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            assert active_adapter.try_compress() == 0
         assert active_adapter.metrics.kill_switch_activations == 1
 
     def test_deactivate_kill_switch(self, active_adapter: SGLangAdapter) -> None:
@@ -477,46 +382,6 @@ class TestBaselineRouting:
         )
         assert adapter._experiment_strategy is strategy
         assert adapter._experiment_strategy_name == "slack_aware"
-
-    def test_build_request_states(
-        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
-    ) -> None:
-        """_build_request_states 正确构建候选列表。"""
-        adapter = SGLangAdapter(config=active_config, scoring=positional_scoring)
-        adapter.track_request("req-1", [1, 2, 3])
-        adapter.track_request("req-2", [4, 5])
-
-        states = adapter._build_request_states()
-        assert len(states) == 2
-        ids = {s.request_id for s in states}
-        assert ids == {"req-1", "req-2"}
-
-    def test_baseline_route_skips_bidkv_pipeline(
-        self, active_config: BidKVConfig, positional_scoring: PositionalScoring
-    ) -> None:
-        """非 bidkv 策略走 _try_compress_baseline 路径。"""
-        from bidkv.baselines import BaselineRegistry
-
-        registry = BaselineRegistry()
-        registry.create_default_registry()
-        strategy = registry.get("slack-aware")
-
-        adapter = SGLangAdapter(
-            config=active_config,
-            scoring=positional_scoring,
-            pressure_config=PressureConfig(enabled=True, threshold_pct=0.50),
-            solver_config=SolverConfig(enabled=True, delta_budget=0.3),
-            experiment_strategy=strategy,
-            experiment_strategy_name="slack_aware",
-        )
-        adapter.track_request("req-1", list(range(100)))
-
-        # _try_compress_baseline is called (not the bid pipeline)
-        # Without scheduler, execute_compression returns 0, so total_freed=0
-        # but it should not raise errors
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            result = adapter._try_compress_baseline(900, 1000, 50)
-        assert result == 0  # no scheduler → execute_compression returns 0
 
     def test_bidkv_name_uses_full_pipeline(
         self, active_config: BidKVConfig, positional_scoring: PositionalScoring

@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **最终冗余代码清理** (2026-04-09):
+  - **Critical fix**: `adapters/vllm/scheduler_hook.py` 移除已删除的 `truncation_hook` 死导入（runtime `ImportError`）
+  - **SGLang adapter Mode B 完全清除**: 删除 `execute_compression()`, `try_compress()`, `_refresh_bids()`,
+    `_execute_acceptance()`, `_try_compress_baseline()`, `_build_request_states()`, `_execute_baseline_actions()`,
+    `_write_audit()` — 这些方法依赖已删除的 `radix_hook.py`，在 Mode A 中为死代码
+  - **H2OStyleStrategy 向后兼容别名删除**: `baselines/__init__.py` / `bidkv/__init__.py`
+  - **STRATEGY_H2O_STYLE 常量删除**: `experiments/sglang/config.py`（无外部调用者）
+  - **SGLang 测试清理**: 删除 `TestPressureCompression`、`test_shared_tokens_excluded_from_compression`、
+    `test_build_request_states`、`test_baseline_route_skips_bidkv_pipeline`、
+    Mode B `try_compress`/`execute_compression` 测试（共 -8 tests）
+  - 测试总数：441 → 433（-8 Mode B SGLang 测试）
+
 - **Mode B dead code removal from `adapters/vllm/adapter.py`** (2026-04-09):
   - 删除 `execute_compression()`, `execute_abort()`, `_execute_tail_truncation()`,
     `_sync_model_runner_block_table()` — Mode B Token-level truncation 入口，

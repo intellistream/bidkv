@@ -15,7 +15,6 @@ from bidkv.baselines import (
     BaselineStrategy,
     BidKVStrategy,
     CompressionAction,
-    H2OStyleStrategy,
     LargestFirstStrategy,
     PreemptEvictSJFStrategy,
     PreemptEvictStrategy,
@@ -88,7 +87,6 @@ __all__ = [
     "BaselineStrategy",
     "BidKVStrategy",
     "CompressionAction",
-    "H2OStyleStrategy",  # backward compat alias for LargestFirstStrategy
     "LargestFirstStrategy",
     "PreemptEvictStrategy",
     "PreemptEvictSJFStrategy",

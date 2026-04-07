@@ -191,8 +191,9 @@ def main() -> None:
         # Scheduler process.  This replaces the old runpy.run_module approach
         # which could not inject hooks across spawn boundaries.
         if server_args.grpc_mode:
-            from sglang.srt.entrypoints.grpc_server import serve_grpc
             import asyncio
+
+            from sglang.srt.entrypoints.grpc_server import serve_grpc
 
             asyncio.run(serve_grpc(server_args))
         elif getattr(server_args, "encoder_only", False):

@@ -26,9 +26,6 @@ from bidkv.baselines.slack_aware import SlackAwareStrategy
 from bidkv.baselines.static_random import StaticRandomStrategy
 from bidkv.baselines.uniform import UniformStrategy
 
-# Backward compatibility alias
-H2OStyleStrategy = LargestFirstStrategy
-
 __all__ = [
     # Types
     "BaselineContext",
@@ -39,7 +36,6 @@ __all__ = [
     "BaselineRegistry",
     # Strategies
     "BidKVStrategy",
-    "H2OStyleStrategy",  # backward compat alias
     "LargestFirstStrategy",
     "PreemptEvictStrategy",
     "PreemptEvictSJFStrategy",

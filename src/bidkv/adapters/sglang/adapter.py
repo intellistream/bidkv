@@ -11,9 +11,6 @@ BidKV 在 SGLang 上的角色是 **请求调度插件**——控制 WHO gets evi
 3. Scoring 回调：decode step 后更新评分策略
 4. Lifecycle 管理：请求完成时清理 bid 和前缀追踪
 
-.. deprecated::
-    Token-level 方法（execute_compression, try_compress 等）已标记为 DEPRECATED
-    (Mode B)——在 Mode A 实验中为死代码。保留用于 Mode B 扩展（issue #054）。
 """
 
 from __future__ import annotations
@@ -21,24 +18,17 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from bidkv.adapters.base import BaseAdapterMetrics, FrameworkAdapter
-from bidkv.baselines.base import BaselineStrategy, CompressionAction, RequestState
+from bidkv.baselines.base import BaselineStrategy
 from bidkv.config import BidKVConfig
 from bidkv.pool import BidPoolManager
 from bidkv.pressure import PressureConfig, PressureDetector
 from bidkv.scoring.base import ScoringStrategy
-from bidkv.scoring.bid_builder import build_bids
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
-if TYPE_CHECKING:
-    from bidkv.protocol.bid import BidAcceptance
-
 logger = logging.getLogger(__name__)
-
-# 默认压缩级别（论文 §4 标准设置）
-DEFAULT_COMPRESSION_LEVELS: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
 
 
 class SGLangAdapter(FrameworkAdapter):
@@ -61,8 +51,6 @@ class SGLangAdapter(FrameworkAdapter):
         PressureDetector 配置。若为 None 使用默认值。
     solver_config:
         GreedyBidSolver 配置。若为 None 使用默认值。
-    compression_levels:
-        bid 生成使用的压缩级别。默认 (0.2, 0.4, 0.6, 0.8)。
     """
 
     def __init__(
@@ -73,7 +61,6 @@ class SGLangAdapter(FrameworkAdapter):
         scheduler: Any = None,
         pressure_config: PressureConfig | None = None,
         solver_config: SolverConfig | None = None,
-        compression_levels: Sequence[float] | None = None,
         experiment_strategy: BaselineStrategy | None = None,
         experiment_strategy_name: str = "bidkv",
         audit_dir: Path | None = None,
@@ -96,7 +83,6 @@ class SGLangAdapter(FrameworkAdapter):
             kill_switch=config.kill_switch,
         )
         self._solver = GreedyBidSolver(s_cfg)
-        self._compression_levels = tuple(compression_levels or DEFAULT_COMPRESSION_LEVELS)
 
         # 请求追踪
         # {request_id: list[int]} — 每个请求的 token ids
@@ -117,10 +103,9 @@ class SGLangAdapter(FrameworkAdapter):
         self._metrics = _AdapterMetrics()
 
         logger.info(
-            "SGLangAdapter created: enabled=%s, kill_switch=%s, compression_levels=%s",
+            "SGLangAdapter created: enabled=%s, kill_switch=%s",
             config.is_active,
             config.kill_switch,
-            self._compression_levels,
         )
 
     # ------------------------------------------------------------------
@@ -212,90 +197,6 @@ class SGLangAdapter(FrameworkAdapter):
         used = total - available
         return (used, total)
 
-    def execute_compression(self, request_id: str, target_tokens: int) -> int:
-        """[DEPRECATED — Mode B] 在 SGLang 中执行 KV 压缩（radix tree 节点级缩减）。
-
-        在 Mode A（request-level 调度）中不使用。
-        保留用于潜在的 Mode B 扩展（issue #054）。
-
-        Parameters
-        ----------
-        request_id:
-            目标请求 ID。
-        target_tokens:
-            期望释放的 token 数量。
-
-        Returns
-        -------
-        int
-            实际释放的 token 数量。
-        """
-        import warnings
-
-        warnings.warn(
-            "SGLangAdapter.execute_compression() is deprecated (Mode B). "
-            "Mode A uses request-level scheduling via scheduler_hook.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not self._config.is_active:
-            return 0
-
-        token_ids = self._request_tokens.get(request_id)
-        if not token_ids:
-            logger.debug("execute_compression: no tokens tracked for request %s", request_id)
-            return 0
-
-        # 获取评分
-        scores = self._scoring.score(token_ids)
-        if len(scores) != len(token_ids):
-            logger.warning(
-                "execute_compression: score length mismatch (scores=%d, tokens=%d)",
-                len(scores),
-                len(token_ids),
-            )
-            return 0
-
-        # 获取共享位置（这些位置不可压缩）
-        shared = self._shared_positions.get(request_id, set())
-
-        # 按分数升序排列（低分 = 不重要 = 优先压缩），排除共享位置
-        candidates = [(pos, score) for pos, score in enumerate(scores) if pos not in shared]
-        candidates.sort(key=lambda x: x[1])
-
-        # 选取要释放的 token 位置
-        positions_to_free = [pos for pos, _ in candidates[:target_tokens]]
-
-        if not positions_to_free:
-            return 0
-
-        if self._scheduler is None:
-            logger.debug(
-                "execute_compression: no scheduler, cannot free KV for request %s",
-                request_id,
-            )
-            return 0
-
-        from bidkv.adapters.sglang.radix_hook import free_kv_positions
-
-        actual_freed = free_kv_positions(self._scheduler, request_id, positions_to_free)
-
-        if actual_freed > 0:
-            # 更新内部追踪：从 token 列表中移除已压缩的位置
-            freed_set = set(positions_to_free[:actual_freed])
-            remaining = [tid for i, tid in enumerate(token_ids) if i not in freed_set]
-            self._request_tokens[request_id] = remaining
-
-        self._metrics.record_eviction(request_id, actual_freed)
-        logger.debug(
-            "execute_compression: request=%s, target=%d, actual_freed=%d, shared_protected=%d",
-            request_id,
-            target_tokens,
-            actual_freed,
-            len(shared),
-        )
-        return actual_freed
-
     def on_request_complete(self, request_id: str) -> None:
         """请求完成时清理 bid 和内部状态。"""
         self._pool_manager.remove_by_request(request_id)
@@ -303,159 +204,6 @@ class SGLangAdapter(FrameworkAdapter):
         self._shared_positions.pop(request_id, None)
         self._metrics.record_request_complete(request_id)
         logger.debug("on_request_complete: request=%s", request_id)
-
-    # ------------------------------------------------------------------
-    # BidKV Pipeline — Pressure-triggered compression cycle
-    # ------------------------------------------------------------------
-
-    def try_compress(self) -> int:
-        """[DEPRECATED — Mode B] 执行一轮 BidKV 压缩周期。
-
-        在 Mode A（request-level 调度）中不使用——压力检测和压缩调度
-        由 scheduler_hook 中的 request-level 调度逻辑驱动。
-        保留用于潜在的 Mode B 扩展（issue #054）。
-
-        Returns
-        -------
-        int
-            本轮实际释放的总 token 数。0 表示未触发或无需压缩。
-        """
-        import warnings
-
-        warnings.warn(
-            "SGLangAdapter.try_compress() is deprecated (Mode B). "
-            "Mode A uses request-level scheduling via scheduler_hook.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not self._config.is_active:
-            return 0
-
-        # Step 1: 更新 KV stats
-        used, total = self.get_kv_stats()
-        self._pressure_detector.update_stats(used, total)
-
-        # Step 2: 检查压力
-        if not self._pressure_detector.is_under_pressure():
-            return 0
-
-        self._metrics.record_pressure_event()
-        tokens_needed = self._pressure_detector.needed_tokens()
-
-        # Fairness audit: 记录压力事件和候选列表
-        self._write_audit(used, total)
-
-        # Strategy routing: baseline strategies use select_victims(),
-        # BidKV uses the full bid pipeline.
-        if self._experiment_strategy is not None and self._experiment_strategy_name != "bidkv":
-            return self._try_compress_baseline(used, total, tokens_needed)
-
-        # Step 3: 为追踪的请求刷新 bids
-        self._refresh_bids()
-
-        # Step 4: Solver 求解
-        pool_snapshot = self._pool_manager.get_pool_snapshot()
-        acceptance = self._solver.solve(
-            pool_snapshot,
-            tokens_needed,
-            decision_reason="sglang_kv_pressure",
-        )
-
-        if acceptance.is_empty:
-            return 0
-
-        # Step 5: 执行压缩
-        total_freed = self._execute_acceptance(acceptance, pool_snapshot)
-        return total_freed
-
-    def _refresh_bids(self) -> None:
-        """为所有追踪的请求重新生成 bids。"""
-        for request_id, token_ids in self._request_tokens.items():
-            if not token_ids:
-                continue
-            scores = self._scoring.score(token_ids)
-            bids = build_bids(
-                request_id=request_id,
-                token_ids=token_ids,
-                scores=scores,
-                compression_levels=self._compression_levels,
-                algorithm_id="bidkv",
-            )
-            self._pool_manager.submit_bids(request_id, bids)
-
-    def _execute_acceptance(self, acceptance: BidAcceptance, pool_snapshot: Any) -> int:
-        """[DEPRECATED — Mode B] 执行 Solver 接受的 bid 组合。"""
-        total_freed = 0
-        for bid_id in acceptance.accepted_bid_ids:
-            bid = self._pool_manager.get_bid(bid_id)
-            if bid is None:
-                continue
-            freed = self.execute_compression(bid.request_id, bid.tokens_freed)
-            total_freed += freed
-        return total_freed
-
-    # ------------------------------------------------------------------
-    # Fairness audit
-    # ------------------------------------------------------------------
-
-    def _write_audit(self, used: int, total: int) -> None:
-        """Write a fairness audit entry when pressure is detected."""
-        if self._audit_dir is None:
-            return
-        from bidkv.experiments.sglang.collector import write_audit_entry
-
-        candidate_ids = list(self._request_tokens.keys())
-        kv_usage_pct = used / total if total > 0 else 0.0
-        audit_path = self._audit_dir / f"audit_{self._experiment_strategy_name}.jsonl"
-        write_audit_entry(
-            audit_path,
-            candidate_count=len(candidate_ids),
-            candidate_request_ids=candidate_ids,
-            strategy=self._experiment_strategy_name,
-            kv_usage_pct=kv_usage_pct,
-        )
-
-    # ------------------------------------------------------------------
-    # Baseline strategy routing
-    # ------------------------------------------------------------------
-
-    def _try_compress_baseline(self, used: int, total: int, tokens_needed: int) -> int:
-        """[DEPRECATED — Mode B] Route compression through a BaselineStrategy."""
-        strategy = self._experiment_strategy
-        assert strategy is not None
-
-        candidates = self._build_request_states()
-        if not candidates:
-            return 0
-
-        actions = strategy.select_victims(candidates, tokens_needed)
-        if not actions:
-            return 0
-
-        return self._execute_baseline_actions(actions)
-
-    def _build_request_states(self) -> list[RequestState]:
-        """Build RequestState list from tracked requests."""
-        states: list[RequestState] = []
-        for request_id, token_ids in self._request_tokens.items():
-            if not token_ids:
-                continue
-            states.append(
-                RequestState(
-                    request_id=request_id,
-                    current_tokens=len(token_ids),
-                    token_ids=tuple(token_ids),
-                )
-            )
-        return states
-
-    def _execute_baseline_actions(self, actions: list[CompressionAction]) -> int:
-        """[DEPRECATED — Mode B] Execute CompressionAction list."""
-        total_freed = 0
-        for action in actions:
-            freed = self.execute_compression(action.request_id, action.target_tokens)
-            total_freed += freed
-        return total_freed
 
     # ------------------------------------------------------------------
     # Request tracking

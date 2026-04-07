@@ -58,16 +58,6 @@ def install_scheduler_hook(scheduler: Any, adapter: VLLMAdapter) -> None:
     adapter:
         VLLMAdapter 实例。
     """
-    # [DEPRECATED] Mode B: Install KV truncation support (token-level block release).
-    # This installs truncate_request_tail() on KVCacheManager but the method is
-    # never called in Mode A (request-level preempt+recompute). Retained for
-    # potential Mode B extension (issue #054).
-    kv_cache_manager = getattr(scheduler, "kv_cache_manager", None)
-    if kv_cache_manager is not None:
-        from bidkv.adapters.vllm.truncation_hook import install_truncation_support
-
-        install_truncation_support(kv_cache_manager)
-
     # 保存原始方法
     setattr(scheduler, f"{_ORIG_PREFIX}schedule", scheduler.schedule)
     setattr(scheduler, f"{_ORIG_PREFIX}update_from_output", scheduler.update_from_output)

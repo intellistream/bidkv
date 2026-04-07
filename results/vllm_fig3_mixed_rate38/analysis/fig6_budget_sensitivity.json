@@ -1,0 +1,16 @@
+[
+  {
+    "workload": "mixed",
+    "rate": 3.8,
+    "bidkv_slo": 0.9103333333333334,
+    "bidkv_ci95": 0.04728951537896938,
+    "largest-first_slo": 0.9236666666666666,
+    "largest-first_ci95": 0.007589778594340629,
+    "preempt-evict_slo": 0.8226666666666667,
+    "preempt-evict_ci95": 0.03427426462295633,
+    "preempt-evict-sjf_slo": 0.879,
+    "preempt-evict-sjf_ci95": 0.11885942228952666,
+    "static-random_slo": 0.944,
+    "static-random_ci95": 0.002484338208322962
+  }
+]
