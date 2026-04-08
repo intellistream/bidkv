@@ -130,28 +130,30 @@ responsiveness under sustained KV pressure.
 \hfill
 \begin{subfigure}[b]{0.50\textwidth}
   \includegraphics[width=\linewidth]{figures/fig1_intro_evidence_panel_b.pdf}
-  \caption{Victim-selection profiles for three strategies across 150\,KV-pressure
-    snapshots (mixed ShareGPT, rate\,=\,3.8\,req/s).
-    \textbf{Top}: CDF of each strategy's chosen victim's KV-footprint
-    \emph{rank} within its snapshot (1\,=\,largest candidate).
-    LIFO\,(red) is spread uniformly, recovering little KV ($\bar{r}\!=\!0.21$).
-    Largest-first\,(blue) always picks rank\,1 (vertical step at\,1.0).
-    BidKV\,(green) concentrates near rank\,1 ($\bar{r}\!=\!0.96$), matching
-    Largest-first in KV recovery.
-    \textbf{Bottom}: CDF of chosen victim's completion ratio\,$c$
-    (0\,=\,newest, 1\,=\,almost done).
-    BidKV's curve is \emph{left-shifted} vs.\ Largest-first
-    ($\bar{c}\!=\!0.64$ vs.\ 0.74), confirming it prefers lower-cost victims
-    that free nearly the same KV.}
+  \caption{Victim-selection trade-off space across 150 KV-pressure snapshots
+    (mixed ShareGPT, rate\,=\,3.8\,req/s).
+    Each point is one strategy's chosen victim at one snapshot: X\,=\,completion
+    ratio $c$ (recompute cost proxy; 0\,=\,newest), Y\,=\,KV-footprint rank
+    (1\,=\,largest available).
+    Filled ellipses show 1.5$\sigma$ concentration regions; diamonds mark means.
+    The \textbf{ideal zone} (green shading) is upper-left: high KV freed at low
+    recompute cost.
+    LIFO\,(red) sits in the lower-left — low KV recovery ($\bar{r}\!=\!0.21$), wasting
+    each preemption opportunity.
+    Largest-first\,(blue) reaches the top edge ($\bar{r}\!=\!1.00$) but drifts
+    rightward ($\bar{c}\!=\!0.74$), incurring unnecessary recompute cost.
+    BidKV\,(green) lands firmly in the ideal zone ($\bar{r}\!=\!0.96$,
+    $\bar{c}\!=\!0.64$): near-maximum KV recovery at lower cost than
+    Largest-first — not a compromise, but a dominant trade-off point.}
   \label{fig:intro:lifo}
 \end{subfigure}
 \caption{\textbf{The victim-selection problem under KV pressure.}
   (a)~Reclamation opportunity spans orders of magnitude at every pressure event.
-  (b)~CDFs of KV rank and completion ratio $c$ of chosen victims:
-  LIFO wastes preemption events (low KV, $\bar{r}\!=\!0.21$);
-  Largest-first maximises KV but ignores cost ($\bar{c}\!=\!0.74$);
-  BidKV recovers nearly as much KV ($\bar{r}\!=\!0.96$) at lower
-  recompute cost ($\bar{c}\!=\!0.64$).}
+  (b)~Victim-selection trade-off space: X\,=\,recompute cost ($c$),
+  Y\,=\,KV footprint rank.
+  LIFO wastes KV capacity ($\bar{r}\!=\!0.21$); Largest-first maximises KV but
+  ignores cost ($\bar{c}\!=\!0.74$); BidKV occupies the ideal upper-left zone
+  ($\bar{r}\!=\!0.96$, $\bar{c}\!=\!0.64$), dominating both baselines.}
 \label{fig:intro_evidence}
 \end{figure*}
 

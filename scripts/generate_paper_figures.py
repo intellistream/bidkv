@@ -299,25 +299,29 @@ def generate_fig5(groups: dict) -> None:
 
 
 def generate_fig1_panel_b_scatter() -> None:
-    """Generate panel (b) for Figure 1: victim-selection CDF profiles.
+    """Generate panel (b) for Figure 1: 2D trade-off space with confidence ellipses.
 
-    For each of 150 KV-pressure snapshots, record the chosen victim's:
-      - per-snapshot KV-footprint rank (0 = smallest candidate, 1 = largest)
-      - completion ratio c = progress in [0, 1]  (0 = just started, 1 = done)
+    Each of 150 snapshots contributes ONE point per strategy:
+      X = completion ratio c of the chosen victim  (0=newest, cheapest)
+      Y = KV-footprint rank of the chosen victim   (0=smallest, 1=largest)
 
-    Two stacked CDFs make the contrast overlap-free:
-      Top:    distribution of KV rank recovered  — higher is better
-      Bottom: distribution of recompute cost c   — lower (left) is better
+    The ideal victim is in the UPPER-LEFT corner: high KV (good) + low c (cheap).
 
-    Expected result:
-      KV CDFs:   LIFO gradual (random KV), LF step at 1.0, BidKV near-1
-      Cost CDFs: LIFO spike at c≈0, LF roughly uniform, BidKV left-shifted vs LF
+    Expected positions:
+      LIFO         → lower-left : c≈0.13, rank≈0.21  (low cost by accident, low KV)
+      Largest-first → upper-right: c≈0.74, rank=1.00  (max KV, ignores cost)
+      BidKV         → upper-left : c≈0.63, rank≈0.96  (near-max KV at lower cost)
+
+    BidKV is NOT "between" the others — it is in the optimal region that neither
+    baseline reaches.
 
     Output: paper/figures/fig1_intro_evidence_panel_b.{pdf,png}
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
 
     pe_path = RESULTS_DIR / "preempt-evict__mixed__rate3.8__r0.json"
     if not pe_path.exists():
@@ -351,12 +355,12 @@ def generate_fig1_panel_b_scatter() -> None:
     MIN_CONC = 6
     EPSILON = 0.01
 
-    lifo_ky: list[float] = []
     lifo_c: list[float] = []
-    lf_ky: list[float] = []
+    lifo_r: list[float] = []
     lf_c: list[float] = []
-    bk_ky: list[float] = []
+    lf_r: list[float] = []
     bk_c: list[float] = []
+    bk_r: list[float] = []
 
     for i in range(N_SAMPLES):
         t = t0 + (t1 - t0) * (0.1 + 0.8 * i / N_SAMPLES)
@@ -367,21 +371,21 @@ def generate_fig1_panel_b_scatter() -> None:
         n = len(snap)
         pairs = [_c_kv(r, t) for r in snap]  # (c, Y)
 
-        # Per-snapshot rank on Y = KV footprint (0 = smallest, 1 = largest)
+        # Per-snapshot rank on Y = KV footprint (0=smallest, 1=largest)
         sy = sorted(range(n), key=lambda j: pairs[j][1])
         rank_y = [0.0] * n
         for rk, idx in enumerate(sy):
             rank_y[idx] = rk / max(n - 1, 1)
 
-        # LIFO: most recently started decoding (max first_token_time)
+        # LIFO: most recently started decoding
         li = max(range(n), key=lambda j: snap[j]["first_token_time"])
-        lifo_ky.append(rank_y[li])
         lifo_c.append(pairs[li][0])
+        lifo_r.append(rank_y[li])
 
-        # Largest-first: max KV footprint (rank_y always 1.0 by definition)
+        # Largest-first: max KV footprint
         lfi = max(range(n), key=lambda j: pairs[j][1])
-        lf_ky.append(rank_y[lfi])
         lf_c.append(pairs[lfi][0])
+        lf_r.append(rank_y[lfi])
 
         # BidKV: max utility U = Y / (1 + 0.5*c + ε)
         us = [
@@ -389,15 +393,34 @@ def generate_fig1_panel_b_scatter() -> None:
             for j in range(n)
         ]
         bi = max(range(n), key=lambda j: us[j])
-        bk_ky.append(rank_y[bi])
         bk_c.append(pairs[bi][0])
+        bk_r.append(rank_y[bi])
 
-    n_snaps = len(lifo_ky)
+    n_snaps = len(lifo_c)
 
-    def _cdf(vals: list[float]) -> tuple[list[float], list[float]]:
-        sv = sorted(vals)
-        probs = [(i + 1) / len(sv) for i in range(len(sv))]
-        return sv, probs
+    def _mean(lst: list[float]) -> float:
+        return sum(lst) / len(lst) if lst else float("nan")
+
+    def _confidence_ellipse(
+        xs: list[float], ys: list[float], ax: "plt.Axes", n_std: float = 1.5, **kwargs: object
+    ) -> mpatches.Ellipse:
+        """Draw a covariance confidence ellipse around (xs, ys)."""
+        xa = np.array(xs)
+        ya = np.array(ys)
+        cov = np.cov(xa, ya)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        order = eigenvalues.argsort()[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+        angle = float(np.degrees(np.arctan2(*eigenvectors[:, 0][::-1])))
+        w = 2 * n_std * float(np.sqrt(max(eigenvalues[0], 0.0)))
+        h = 2 * n_std * float(np.sqrt(max(eigenvalues[1], 0.0)))
+        ellipse = mpatches.Ellipse(
+            (float(np.mean(xa)), float(np.mean(ya))),
+            w, h, angle=angle, **kwargs
+        )
+        ax.add_patch(ellipse)
+        return ellipse
 
     # ── Figure ────────────────────────────────────────────────────────────────
     plt.rcParams.update({
@@ -412,49 +435,78 @@ def generate_fig1_panel_b_scatter() -> None:
         "grid.linewidth": 0.4,
     })
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3.35, 3.0), sharex=False)
-    colors = {"LIFO": "#d62728", "Largest-first": "#1f77b4", "BidKV": "#2ca02c"}
+    fig, ax = plt.subplots(figsize=(3.35, 2.85))
 
-    # ── Top: CDF of KV-footprint rank ─────────────────────────────────────────
-    for label, vals in [("LIFO", lifo_ky), ("Largest-first", lf_ky), ("BidKV", bk_ky)]:
-        xs, ys = _cdf(vals)
-        ax1.plot([0.0] + xs + [1.0], [0.0] + ys + [1.0],
-                 color=colors[label], lw=1.5, label=label, drawstyle="steps-post")
-    ax1.set_xlim(-0.02, 1.04)
-    ax1.set_ylim(-0.03, 1.08)
-    ax1.set_xlabel("KV-Footprint Rank of Selected Victim  (1 = largest)", labelpad=2)
-    ax1.set_ylabel("CDF", labelpad=2)
-    ax1.text(0.01, 0.97, "more KV freed →", transform=ax1.transAxes,
-             ha="left", va="top", fontsize=5.5, color="#555555", style="italic")
-    ax1.legend(loc="upper left", framealpha=0.9, fontsize=6.5,
-               handlelength=1.4, borderpad=0.4, labelspacing=0.25)
-    ax1.grid(True, linestyle=":", alpha=0.35)
+    strategies = [
+        ("LIFO",          lifo_c, lifo_r, "#d62728"),
+        ("Largest-first", lf_c,   lf_r,   "#1f77b4"),
+        ("BidKV",         bk_c,   bk_r,   "#2ca02c"),
+    ]
 
-    # ── Bottom: CDF of completion ratio c ────────────────────────────────────
-    for label, vals in [("LIFO", lifo_c), ("Largest-first", lf_c), ("BidKV", bk_c)]:
-        xs, ys = _cdf(vals)
-        ax2.plot([0.0] + xs + [1.0], [0.0] + ys + [1.0],
-                 color=colors[label], lw=1.5, label=label, drawstyle="steps-post")
-    ax2.set_xlim(-0.02, 1.04)
-    ax2.set_ylim(-0.03, 1.08)
-    ax2.set_xlabel("Completion Ratio $c$ of Selected Victim  (0 = newest)", labelpad=2)
-    ax2.set_ylabel("CDF", labelpad=2)
-    ax2.text(0.99, 0.03, "← less recompute cost", transform=ax2.transAxes,
-             ha="right", va="bottom", fontsize=5.5, color="#555555", style="italic")
-    ax2.grid(True, linestyle=":", alpha=0.35)
+    # ── Ideal zone: upper-left quadrant ───────────────────────────────────────
+    ideal_patch = mpatches.FancyBboxPatch(
+        (-0.02, 0.72), 0.72, 0.32,
+        boxstyle="round,pad=0.01",
+        facecolor="#e8f5e9", edgecolor="#66bb6a",
+        linewidth=0.8, alpha=0.50, zorder=0,
+    )
+    ax.add_patch(ideal_patch)
+    ax.text(0.34, 1.052, "Ideal: high KV, low cost",
+            ha="center", va="bottom", fontsize=5.5,
+            color="#388e3c", style="italic")
 
-    fig.suptitle("(b) Victim-Selection Profiles  ($n$=" + str(n_snaps) + " snapshots)",
-                 fontsize=8, y=1.01)
-    fig.tight_layout(pad=0.5, h_pad=0.8)
+    for label, cs, rs, color in strategies:
+        # Scatter (light, small)
+        ax.scatter(cs, rs, s=10, color=color, edgecolors="none",
+                   alpha=0.28, zorder=2)
+        # 1.5σ confidence ellipse (filled, low alpha)
+        _confidence_ellipse(cs, rs, ax, n_std=1.5,
+                            facecolor=color, edgecolor=color,
+                            alpha=0.18, linewidth=0, zorder=3)
+        # 1.5σ confidence ellipse (outline only)
+        _confidence_ellipse(cs, rs, ax, n_std=1.5,
+                            facecolor="none", edgecolor=color,
+                            alpha=0.85, linewidth=1.2, zorder=4)
+        # Mean marker
+        mx, my = _mean(cs), _mean(rs)
+        ax.plot(mx, my, marker="D", ms=5, color=color, zorder=6,
+                markeredgecolor="white", markeredgewidth=0.5)
+
+    # ── Legend (manual, to include the mean marker style) ────────────────────
+    handles = [
+        mpatches.Patch(facecolor="#d62728", edgecolor="#d62728", alpha=0.7, label="LIFO"),
+        mpatches.Patch(facecolor="#1f77b4", edgecolor="#1f77b4", alpha=0.7, label="Largest-first"),
+        mpatches.Patch(facecolor="#2ca02c", edgecolor="#2ca02c", alpha=0.7, label="BidKV"),
+    ]
+    ax.legend(handles=handles, loc="lower right", framealpha=0.92,
+              fontsize=6.5, borderpad=0.5, handlelength=1.0, labelspacing=0.3)
+
+    # ── Axis labels and ticks ─────────────────────────────────────────────────
+    ax.set_xlabel("Completion Ratio $c$ of Selected Victim\n(0 = newest, cheapest to recompute)", labelpad=3)
+    ax.set_ylabel("KV-Footprint Rank of Selected Victim\n(0 = smallest, 1 = largest KV freed)", labelpad=3)
+    ax.set_title("(b) Victim-Selection Trade-off Space  ($n$=" + str(n_snaps) + ")", pad=4)
+    ax.set_xlim(-0.05, 1.08)
+    ax.set_ylim(-0.10, 1.12)
+    ax.set_xticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    ax.grid(True, linestyle=":", alpha=0.30)
+
+    # ── Diagonal direction arrow (lower-right → upper-left = improvement) ────
+    ax.annotate("",
+        xy=(0.04, 0.88), xycoords="data",
+        xytext=(0.30, 0.55), textcoords="data",
+        arrowprops=dict(arrowstyle="-|>", color="#555555", lw=1.0),
+    )
+    ax.text(0.175, 0.69, "better\ntrade-off", ha="center", va="center",
+            fontsize=5.0, color="#555555", style="italic", rotation=-42)
+
+    fig.tight_layout(pad=0.5)
     save_fig(fig, "fig1_intro_evidence_panel_b")
     plt.close(fig)
 
-    def _mean(lst: list[float]) -> float:
-        return sum(lst) / len(lst) if lst else float("nan")
-
     print(
         f"  Panel (b): {n_snaps} snapshots\n"
-        f"    KV rank mean  — LIFO:{_mean(lifo_ky):.3f}  LF:{_mean(lf_ky):.3f}  BidKV:{_mean(bk_ky):.3f}\n"
+        f"    KV rank mean  — LIFO:{_mean(lifo_r):.3f}  LF:{_mean(lf_r):.3f}  BidKV:{_mean(bk_r):.3f}\n"
         f"    c mean        — LIFO:{_mean(lifo_c):.3f}  LF:{_mean(lf_c):.3f}  BidKV:{_mean(bk_c):.3f}"
     )
 
