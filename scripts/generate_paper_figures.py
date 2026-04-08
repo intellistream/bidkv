@@ -440,20 +440,20 @@ def generate_fig1_panel_b_scatter() -> None:
     strategies = [
         ("LIFO",          lifo_c, lifo_r, "#d62728"),
         ("Largest-first", lf_c,   lf_r,   "#1f77b4"),
-        ("BidKV",         bk_c,   bk_r,   "#2ca02c"),
+        ("BidKV",         bk_c,   bk_r,   "#e8a800"),
     ]
 
     # ── Ideal zone: upper-left quadrant ───────────────────────────────────────
     ideal_patch = mpatches.FancyBboxPatch(
         (-0.02, 0.72), 0.72, 0.32,
         boxstyle="round,pad=0.01",
-        facecolor="#e8f5e9", edgecolor="#66bb6a",
+        facecolor="#fff8e1", edgecolor="#c8960a",
         linewidth=0.8, alpha=0.50, zorder=0,
     )
     ax.add_patch(ideal_patch)
     ax.text(0.34, 1.052, "Ideal: high KV, low cost",
             ha="center", va="bottom", fontsize=5.5,
-            color="#388e3c", style="italic")
+            color="#8a6200", style="italic")
 
     for label, cs, rs, color in strategies:
         # Scatter (light, small)
@@ -476,7 +476,7 @@ def generate_fig1_panel_b_scatter() -> None:
     handles = [
         mpatches.Patch(facecolor="#d62728", edgecolor="#d62728", alpha=0.7, label="LIFO"),
         mpatches.Patch(facecolor="#1f77b4", edgecolor="#1f77b4", alpha=0.7, label="Largest-first"),
-        mpatches.Patch(facecolor="#2ca02c", edgecolor="#2ca02c", alpha=0.7, label="BidKV"),
+        mpatches.Patch(facecolor="#e8a800", edgecolor="#e8a800", alpha=0.9, label="BidKV"),
     ]
     ax.legend(handles=handles, loc="lower right", framealpha=0.92,
               fontsize=6.5, borderpad=0.5, handlelength=1.0, labelspacing=0.3)
