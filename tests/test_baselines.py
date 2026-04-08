@@ -183,7 +183,7 @@ class TestBaselineRegistry:
     def test_create_default_registry(self) -> None:
         registry = BaselineRegistry()
         registry.create_default_registry()
-        assert registry.count == 8
+        assert registry.count == 7
         # 验证所有 7 个策略都已注册
         for name in [
             "preempt-evict",

@@ -17,7 +17,6 @@ import time
 
 from bidkv.protocol.bid import _UTILITY_EPSILON, BidAcceptance, BidPool
 from bidkv.solver.config import SolverConfig
-from bidkv.solver.execution_result import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -191,86 +190,6 @@ class GreedyBidSolver:
         """
         tokens_needed = detector.needed_tokens()  # type: ignore[union-attr]
         return self.solve(pool, tokens_needed, delta_budget, decision_reason=decision_reason)
-
-    def execute_accepted(
-        self,
-        acceptance: BidAcceptance,
-        pool: BidPool,
-        executor: object,
-    ) -> list[ExecutionResult]:
-        """执行已接受的 bid 并记录 actual vs estimated（Fix S04 #021）。
-
-        对每个 accepted bid，调用 ``executor.execute(request_id, tokens_freed)``
-        获取实际释放量，返回 :class:`ExecutionResult` 列表。
-
-        Parameters
-        ----------
-        acceptance:
-            ``solve()`` 返回的 BidAcceptance。
-        pool:
-            ``solve()`` 使用的同一 BidPool 快照（用于查找 bid 详情）。
-        executor:
-            实现 ``execute(request_id, target_tokens) -> int`` 的
-            CompressionExecutor 实例。
-
-        Returns
-        -------
-        list[ExecutionResult]
-            每个 accepted bid 的执行结果。
-        """
-        if acceptance.is_empty:
-            return []
-
-        # 建立 bid_id → CompressionBid 索引
-        bid_index = {b.bid_id: b for b in pool.bids}
-
-        results: list[ExecutionResult] = []
-        for bid_id in acceptance.accepted_bid_ids:
-            bid = bid_index.get(bid_id)
-            if bid is None:
-                results.append(
-                    ExecutionResult(
-                        bid_id=bid_id,
-                        estimated_freed=0,
-                        actual_freed=0,
-                        success=False,
-                    )
-                )
-                continue
-
-            try:
-                actual = executor.execute(bid.request_id, bid.tokens_freed)  # type: ignore[union-attr]
-                results.append(
-                    ExecutionResult(
-                        bid_id=bid_id,
-                        estimated_freed=bid.tokens_freed,
-                        actual_freed=actual,
-                        success=True,
-                    )
-                )
-            except Exception:
-                logger.exception("execute_accepted: bid %s execution failed", bid_id)
-                results.append(
-                    ExecutionResult(
-                        bid_id=bid_id,
-                        estimated_freed=bid.tokens_freed,
-                        actual_freed=0,
-                        success=False,
-                    )
-                )
-
-        total_actual = sum(r.actual_freed for r in results)
-        total_estimated = sum(r.estimated_freed for r in results)
-        if total_actual < total_estimated:
-            logger.warning(
-                "execute_accepted: actual_freed=%d < estimated=%d (shortfall=%d), "
-                "caller should consider fallback eviction",
-                total_actual,
-                total_estimated,
-                total_estimated - total_actual,
-            )
-
-        return results
 
     def _greedy_solve(
         self,

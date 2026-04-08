@@ -260,11 +260,9 @@ def _reorder_waiting_for_admission(scheduler: Any, adapter: SGLangAdapter) -> No
         return
 
     if strategy_name in (
-        "sglang_default", "preempt-evict", "vanilla_sglang",
-        "random_evict", "random-evict",
+        "sglang_default", "preempt-evict",
     ):
-        # FCFS — no reorder. vanilla_sglang/random_evict use FCFS to isolate
-        # victim selection as the only variable.
+        # FCFS — no reorder.
         return
 
     if strategy_name in ("slack_aware", "slack-aware"):
@@ -311,10 +309,9 @@ def _reorder_running_for_preemption(scheduler: Any, adapter: SGLangAdapter) -> N
     """
     strategy_name = adapter._experiment_strategy_name
 
-    # sglang_default/vanilla_sglang: NO reorder — measures pure SGLang default behavior.
+    # sglang_default: NO reorder — measures pure SGLang default behavior.
     # preempt-evict-sjf: NO reorder — LIFO eviction, SJF admission only ablation.
-    # random_evict: falls through to else branch → cached priority (random via RandomEvictStrategy)
-    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf", "vanilla_sglang"):
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf"):
         return
 
     running_ref = _get_running_batch_requests_ref(scheduler)
@@ -361,9 +358,9 @@ def _refresh_priority_cache(scheduler: Any, adapter: SGLangAdapter) -> None:
     strategy = adapter._experiment_strategy
     strategy_name = adapter._experiment_strategy_name
 
-    # sglang_default / preempt-evict-sjf / vanilla_sglang: no priority cache needed
+    # sglang_default / preempt-evict-sjf: no priority cache needed
     if (
-        strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf", "vanilla_sglang")
+        strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf")
         or strategy is None
     ):
         return
@@ -442,7 +439,7 @@ def _proactive_preempt(scheduler: Any, adapter: SGLangAdapter) -> None:
 
     strategy_name = adapter._experiment_strategy_name
 
-    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf", "vanilla_sglang"):
+    if strategy_name in ("sglang_default", "preempt-evict", "preempt-evict-sjf"):
         return
 
     cached = adapter._cached_preempt_priority
@@ -510,7 +507,6 @@ def _proactive_srpt(scheduler: Any, adapter: SGLangAdapter) -> None:
     if strategy_name in (
         "sglang_default", "preempt-evict", "preempt-evict-sjf",
         "slack_aware", "slack-aware",
-        "vanilla_sglang", "random_evict", "random-evict",
     ):
         return
 

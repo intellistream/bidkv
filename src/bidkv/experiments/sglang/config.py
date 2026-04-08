@@ -16,12 +16,7 @@ STRATEGY_SGLANG_DEFAULT = "sglang_default"  # SGLang native (= Preempt-Evict)
 STRATEGY_SLACK_AWARE = "slack_aware"  # 强无-bid 系统对手
 STRATEGY_BIDKV = "bidkv"  # BidKV 完整 bid pipeline
 
-# ── SGLang-native 消融策略（3-strategy ablation chain）────────────────
-STRATEGY_VANILLA_SGLANG = "vanilla_sglang"  # pure SGLang native（无任何干预）
-STRATEGY_RANDOM_EVICT = "random_evict"      # random victim selection（随机干预）
-# bidkv = quality-aware victim selection（质量感知干预）
-
-# ── 扩展策略（验证性实验使用，非 v2.3 冻结 54-run 计划范围）────────────
+# 扩展策略（验证性实验使用，非 v2.3 冻结 54-run 计划范围）
 STRATEGY_PREEMPT_EVICT_SJF = "preempt-evict-sjf"  # SJF admission + LIFO eviction 消融
 
 # v2.3 冻结正式策略（54-run 计划使用）
@@ -31,25 +26,8 @@ FROZEN_STRATEGIES: tuple[str, ...] = (
     STRATEGY_BIDKV,
 )
 
-# SGLang-native 消融链策略（3-strategy: vanilla → random → bidkv）
-SGLANG_NATIVE_ABL_STRATEGIES: tuple[str, ...] = (
-    STRATEGY_VANILLA_SGLANG,
-    STRATEGY_RANDOM_EVICT,
-    STRATEGY_BIDKV,
-)
-
 # 向后兼容别名 = 冻结策略（默认实验配置不变）
 ALL_STRATEGIES: tuple[str, ...] = FROZEN_STRATEGIES
-
-# 所有允许的策略（包含扩展验证策略）
-EXTENDED_STRATEGIES: tuple[str, ...] = (
-    STRATEGY_SGLANG_DEFAULT,
-    STRATEGY_SLACK_AWARE,
-    STRATEGY_BIDKV,
-    STRATEGY_PREEMPT_EVICT_SJF,
-    STRATEGY_VANILLA_SGLANG,
-    STRATEGY_RANDOM_EVICT,
-)
 
 # SGLang 策略名 → BaselineRegistry 内部名映射
 # 未在此映射中的策略名直接用作 registry key（fallback = identity）
@@ -58,8 +36,6 @@ STRATEGY_BASELINE_MAP: dict[str, str] = {
     STRATEGY_SLACK_AWARE: "slack-aware",
     STRATEGY_BIDKV: "bidkv",
     STRATEGY_PREEMPT_EVICT_SJF: "preempt-evict-sjf",
-    STRATEGY_VANILLA_SGLANG: "preempt-evict",  # pure pass-through（在 hook 层特殊处理）
-    STRATEGY_RANDOM_EVICT: "random-evict",      # random victim selection
 }
 
 # ── 工作负载 ──────────────────────────────────────────────────────
@@ -200,10 +176,9 @@ class SGLangExperimentConfig:
         return f"sglang__{strategy}__{workload}__rate{rate}__run{run_index}"
 
     def __post_init__(self) -> None:
-        unknown = set(self.strategies) - set(EXTENDED_STRATEGIES)
+        unknown = set(self.strategies) - set(ALL_STRATEGIES)
         if unknown:
             raise ValueError(
                 f"Unknown strategies: {unknown}. "
-                f"Valid (frozen): {FROZEN_STRATEGIES}. "
-                f"Valid (extended): {EXTENDED_STRATEGIES}"
+                f"Valid strategies: {ALL_STRATEGIES}"
             )

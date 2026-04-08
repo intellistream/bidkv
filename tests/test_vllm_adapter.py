@@ -14,7 +14,7 @@ from bidkv.adapters.vllm.adapter import AdapterMetrics, VLLMAdapter
 from bidkv.config import BidKVConfig
 from bidkv.pool import BidPoolManager
 from bidkv.pressure import PressureConfig, PressureDetector
-from bidkv.scoring import PositionalScoring, UniformScoring
+from bidkv.scoring import PositionalScoring
 from bidkv.solver import GreedyBidSolver, SolverConfig
 
 # ---------------------------------------------------------------------------
@@ -26,12 +26,6 @@ from bidkv.solver import GreedyBidSolver, SolverConfig
 def positional_scoring() -> PositionalScoring:
     """PositionalScoring 实例（默认参数）。"""
     return PositionalScoring()
-
-
-@pytest.fixture
-def uniform_scoring() -> UniformScoring:
-    """UniformScoring 实例（消融基线）。"""
-    return UniformScoring()
 
 
 @pytest.fixture

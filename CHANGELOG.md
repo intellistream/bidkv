@@ -6,7 +6,34 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- **最终冗余代码清理** (2026-04-09):
+- **死代码系统性清理（第二轮）** (2026-04-09):
+  - **文件删除**：`baselines/random_evict.py`（RandomEvictStrategy，未注册、非 v2.3 冻结策略）、
+    `compression/`（整个目录，Mode B CompressionExecutor Protocol）、
+    `scoring/attention.py`（AttentionWeightScoring，依赖 `output_attentions=True`，FlashAttention 不可用）、
+    `scoring/random_score.py`（RandomScoring，无生产调用者）、
+    `scoring/uniform.py`（UniformScoring scoring class，无生产调用者）、
+    `solver/execution_result.py`（ExecutionResult，仅被已删除的 execute_accepted 使用）
+  - **solver/greedy.py**：删除 `execute_accepted()` 方法（Mode B dead code，无生产调用者）
+  - **公开 API 清理**：`solver/__init__.py`、`scoring/__init__.py`、`__init__.py`
+    移除 `ExecutionResult`、`CompressionExecutor`、`AttentionWeightScoring`、
+    `RandomScoring`、`UniformScoring`
+  - **baselines/registry.py**：删除 `RandomEvictStrategy` 导入和注册（策略数 8→7）
+  - **experiments/sglang/config.py**：删除 `STRATEGY_VANILLA_SGLANG`、`STRATEGY_RANDOM_EVICT`、
+    `SGLANG_NATIVE_ABL_STRATEGIES`、`EXTENDED_STRATEGIES` 常量；`STRATEGY_BASELINE_MAP` 精简为 4 条目；
+    `__post_init__` 使用 `ALL_STRATEGIES` 验证
+  - **adapters/sglang/scheduler_hook.py**：删除 `vanilla_sglang`、`random_evict`、`random-evict`
+    字符串字面量（共 5 处 if/tuple 检查）
+  - **测试清理**：
+    - `test_core.py`：删除 `TestCompressionExecutor`、`TestExecutionResult`、`TestExecuteAccepted`、
+      `TestEndToEndWithActualFreed`、`TestImportExecutionResult`（共 -15 tests）
+    - `test_scoring.py`：删除 `TestAttentionWeightScoring`、`TestUniformScoring`、
+      `TestRandomScoring`、`TestScoringCorrelation`；精简 `TestGenerateBidsCommon` 参数化；
+      删除 `TestBidKVStrategyScorerAgnostic` 中 4 个死方法（共 -50 tests）
+    - `test_vllm_adapter.py`：删除 `uniform_scoring` fixture 和 `UniformScoring` 导入
+    - `test_baselines.py`：更新 `test_create_default_registry` 断言（count 8→7）
+  - 测试总数：433 → 373（-60 死测试）
+
+
   - **Critical fix**: `adapters/vllm/scheduler_hook.py` 移除已删除的 `truncation_hook` 死导入（runtime `ImportError`）
   - **SGLang adapter Mode B 完全清除**: 删除 `execute_compression()`, `try_compress()`, `_refresh_bids()`,
     `_execute_acceptance()`, `_try_compress_baseline()`, `_build_request_states()`, `_execute_baseline_actions()`,
