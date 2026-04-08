@@ -130,21 +130,25 @@ responsiveness under sustained KV pressure.
 \hfill
 \begin{subfigure}[b]{0.50\textwidth}
   \includegraphics[width=\linewidth]{figures/fig1_intro_evidence_panel_b.pdf}
-  \caption{Snapshot of a single KV-pressure event under vLLM's native LIFO
-    policy (32 concurrent requests).  Each dot is an active candidate;
-    the red\,\texttimes{} marks the LIFO victim.  LIFO selects the request
-    with the \emph{smallest} KV footprint (fewest tokens to free) while
-    ignoring candidates in the ideal zone (upper-left: large footprint,
-    low invested decode work), directly wasting the preemption event.}
+  \caption{Victim selection by four strategies on the \emph{same} 32-request
+    snapshot at peak KV pressure (rate\,=\,3.8\,req/s).
+    Each dot is an active candidate; coloured markers show each strategy's
+    chosen victim.
+    LIFO\,(\texttimes) picks the newest, smallest-footprint request---worst
+    possible.
+    Largest-first\,(\(\blacklozenge\)) maximises KV freed but ignores the
+    195-token recompute debt already accrued.
+    BidKV\,($\bigstar$) selects for utility $U\!=\!Y/(1{+}0.5c)$: nearly
+    equal KV recovery at half the recompute cost.
+    Random\,(\(\circ\)) is arbitrary but incidentally reasonable here.}
   \label{fig:intro:lifo}
 \end{subfigure}
 \caption{\textbf{The victim-selection problem under KV pressure.}
   (a)~Reclamation opportunity varies by orders of magnitude across
   concurrently active requests at each pressure event.
-  (b)~A snapshot from the PE (LIFO) baseline: LIFO frequently selects
-  ``expensive'' victims (high invested decode work or small KV footprint)
-  while ignoring optimal candidates, directly causing severe recomputation
-  waste and tail-latency degradation.}
+  (b)~Four strategies selecting from the same 32-request snapshot:
+  LIFO picks the worst victim; Largest-first ignores recompute cost;
+  BidKV achieves the best utility trade-off; Random is opaque.}
 \label{fig:intro_evidence}
 \end{figure*}
 

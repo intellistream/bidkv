@@ -299,7 +299,7 @@ def generate_fig5(groups: dict) -> None:
 
 
 def generate_fig1_panel_b_scatter() -> None:
-    """Generate panel (b) for Figure 1: LIFO blind victim-selection scatter.
+    """Generate panel (b) for Figure 1: multi-strategy victim-selection scatter.
 
     Reads the preempt-evict run at rate=3.8 (run 0) and reconstructs a
     snapshot at the peak-concurrency moment.  For each request active at that
@@ -307,11 +307,12 @@ def generate_fig1_panel_b_scatter() -> None:
       X = invested decode work (tokens generated so far at snapshot)
       Y = estimated KV footprint (prompt-proxy + generated tokens)
 
-    The prompt-proxy = min(ttft_ms, 1000) × 0.3 + 50, which caps queueing
-    noise from TTFT while preserving relative prompt-size ordering.
+    Four strategies are compared on the *same* snapshot:
+      - LIFO         : max first_token_time (newest request) → red ×
+      - Largest-first: max Y (biggest KV footprint) → blue ◆
+      - BidKV        : max U = Y / (1 + 0.5·c + ε), c = gen/total → green ★
+      - Random       : random.Random(42) selection → orange ○ (outline)
 
-    LIFO victim = request with the highest first_token_time (most recently
-    entered the decode phase), highlighted as a large red ×.
     The "Ideal Victims" region (top-left: large footprint, low decode work)
     is annotated with a dashed box.
 
@@ -376,6 +377,25 @@ def generate_fig1_panel_b_scatter() -> None:
     lifo_x = lifo_r["completion_tokens"] * p_lifo
     lifo_y = min(lifo_r["ttft_ms"], 1000.0) * 0.3 + 50.0 + lifo_x
 
+    # ── Largest-first victim: max KV footprint ───────────────────────────────
+    lf_idx = max(range(len(snap)), key=lambda i: ys_all[i])
+    lf_x, lf_y = xs_all[lf_idx], ys_all[lf_idx]
+
+    # ── BidKV victim: max U = Y / (1 + 0.5*c + ε), c = progress ratio ───────
+    epsilon = 0.01
+    us = []
+    for i, r in enumerate(snap):
+        c = xs_all[i] / max(float(r["completion_tokens"]), 1.0)
+        us.append(ys_all[i] / (1.0 + 0.5 * c + epsilon))
+    bk_idx = max(range(len(snap)), key=lambda i: us[i])
+    bk_x, bk_y = xs_all[bk_idx], ys_all[bk_idx]
+
+    # ── Random victim (fixed seed=42) ────────────────────────────────────────
+    import random as _random
+    rng = _random.Random(42)
+    rand_idx = rng.randrange(len(snap))
+    rand_x, rand_y = xs_all[rand_idx], ys_all[rand_idx]
+
     # ── Figure ────────────────────────────────────────────────────────────────
     plt.rcParams.update({
         "font.family": "serif",
@@ -391,6 +411,9 @@ def generate_fig1_panel_b_scatter() -> None:
 
     fig, ax = plt.subplots(figsize=(4.5, 3.2))  # half ACM textwidth (figure*)
 
+    x_max = max(xs_all)
+    y_max = max(ys_all)
+
     # All candidates as light-grey dots
     ax.scatter(
         xs_all, ys_all,
@@ -398,17 +421,36 @@ def generate_fig1_panel_b_scatter() -> None:
         zorder=3, label="Active candidate",
     )
 
-    # LIFO victim as large red X
+    # Random victim — orange hollow circle (drawn first so others can overlap)
+    ax.scatter(
+        [rand_x], [rand_y],
+        marker="o", s=130, color="none",
+        edgecolors="#e67e00", linewidths=1.8,
+        zorder=4, label="Random",
+    )
+
+    # Largest-first victim — blue diamond
+    ax.scatter(
+        [lf_x], [lf_y],
+        marker="D", s=100, color="#1f77b4", edgecolors="#003d7a", linewidths=0.8,
+        zorder=5, label="Largest-first",
+    )
+
+    # BidKV victim — green star
+    ax.scatter(
+        [bk_x], [bk_y],
+        marker="*", s=260, color="#2ca02c", edgecolors="#145a14", linewidths=0.6,
+        zorder=6, label="BidKV",
+    )
+
+    # LIFO victim — red × (on top)
     ax.scatter(
         [lifo_x], [lifo_y],
         marker="X", s=160, color="#d62728", edgecolors="#8b0000", linewidths=0.8,
-        zorder=6, label="LIFO victim",
+        zorder=7, label="LIFO",
     )
 
     # ── "Ideal Victims" dashed box in the top-left ────────────────────────────
-    x_max = max(xs_all)
-    y_max = max(ys_all)
-    # Box spans ~bottom 30% of X range, top 35% of Y range
     box_x_right = x_max * 0.28
     box_y_bottom = y_max * 0.68
 
@@ -428,39 +470,31 @@ def generate_fig1_panel_b_scatter() -> None:
         fontsize=6.0, color="#1a6e33", style="italic",
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#1a6e33",
                   alpha=0.85, lw=0.6),
-        zorder=7,
-    )
-
-    # ── Annotation arrow pointing to LIFO victim ─────────────────────────────
-    ann_x = lifo_x + x_max * 0.18
-    ann_y = lifo_y - y_max * 0.12
-    ax.annotate(
-        "LIFO selects here\n(smallest KV free,\nnewest request)",
-        xy=(lifo_x, lifo_y),
-        xytext=(ann_x, ann_y),
-        fontsize=5.5, color="#d62728",
-        arrowprops=dict(arrowstyle="->", color="#d62728", lw=0.8),
-        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#d62728",
-                  alpha=0.9, lw=0.6),
         zorder=8,
     )
 
     ax.set_xlabel("Invested Decode Work (tokens generated so far)")
     ax.set_ylabel("KV Footprint (tokens)")
     ax.set_title(
-        f"(b) Blind Victim Selection under LIFO\n"
-        f"({len(snap)} concurrent requests at peak KV pressure)",
+        f"(b) Victim Selection at Peak KV Pressure\n"
+        f"({len(snap)} concurrent requests, rate=3.8 req/s)",
         pad=3,
     )
     ax.set_xlim(-3, x_max * 1.08)
     ax.set_ylim(min(ys_all) * 0.90, y_max * 1.12)
     ax.grid(True, linestyle=":", alpha=0.35)
-    ax.legend(loc="lower right", framealpha=0.85, fontsize=6)
+    ax.legend(loc="lower right", framealpha=0.88, fontsize=6.5, ncol=1)
 
     fig.tight_layout(pad=0.6)
     save_fig(fig, "fig1_intro_evidence_panel_b")
     plt.close(fig)
-    print(f"  Snapshot: {len(snap)} concurrent, LIFO victim X={lifo_x:.0f} Y={lifo_y:.0f}")
+    print(
+        f"  Snapshot: {len(snap)} concurrent | "
+        f"LIFO=({lifo_x:.0f},{lifo_y:.0f}) "
+        f"LF=({lf_x:.0f},{lf_y:.0f}) "
+        f"BidKV=({bk_x:.0f},{bk_y:.0f}) "
+        f"Rand=({rand_x:.0f},{rand_y:.0f})"
+    )
 
 
 def main() -> None:
