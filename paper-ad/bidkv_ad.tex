@@ -234,7 +234,7 @@ All components are pure Python.
   \item $T_3$ \textbf{SGLang portability execution (pending).}
     Uses the SGLang runner (\texttt{experiments/sglang/runner.py}) with
     3 strategies (BidKV, Slack-Aware, vanilla SGLang) $\times$
-    2 workloads $\times$ 3 arrival rates $\times$ 3 runs (54 total runs).
+    rate~3.8\,req/s $\times$ 3 runs.
     Results for Table~IV are not yet included in this artifact version.
 
   \item $T_4$ \textbf{Analysis.}
@@ -254,10 +254,8 @@ $T_2$ and $T_3$ are independent and can run in parallel if GPUs are available.
     3 runs per (strategy, rate) combination.
   \item Long-context workload: 500 requests,
     rates $\{0.35, 0.5, 0.7\}$\,req/s, 3 runs per combination.
-  \item SGLang portability ($T_3$, pending): mixed and long-context
-    workloads, rates $\{2.0, 3.8, 5.7\}$\,req/s and
-    $\{0.35, 0.5, 0.7\}$\,req/s respectively,
-    3 runs per (strategy, rate) combination (54 total runs).
+  \item SGLang portability ($T_3$, pending): mixed workload,
+    rate~3.8\,req/s, 3 runs per strategy.
   \item KV capacity fixed at 600 blocks (9\,600 tokens) to induce
     sustained KV pressure; this is the critical parameter for
     strategy differentiation and must not be changed.
