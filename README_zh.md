@@ -38,8 +38,6 @@ BidKV **不执行压缩**——它只控制"谁被 preempt"，底层执行仍是
 | `preempt-evict-sjf` | `PreemptEvictSJFStrategy` | SJF admission + LIFO 驱逐 |
 | `static-random` | `StaticRandomStrategy` | 随机受害者选择 |
 | `largest-first` | `LargestFirstStrategy` | 容量贪心：优先驱逐 KV 占用最大的请求 |
-| `uniform` | `UniformStrategy` | 按比例均等驱逐 |
-| `slack-aware` | `SlackAwareStrategy` | SLO deadline 感知的受害者选择 |
 | `bidkv` | `BidKVStrategy` | 质量感知：最大化 U = r / (δ + ε) |
 
 ## 配置
@@ -66,8 +64,7 @@ from bidkv import (
     BaselineRegistry,
     BidKVStrategy,
     PreemptEvictStrategy, LargestFirstStrategy,
-    SlackAwareStrategy, StaticRandomStrategy,
-    UniformStrategy, PreemptEvictSJFStrategy,
+    StaticRandomStrategy, PreemptEvictSJFStrategy,
 )
 
 # 注册全部内置策略
@@ -87,9 +84,9 @@ print(registry2.list_strategies())  # ["bidkv", "preempt-evict"]
 ## 运行实验
 
 ```bash
-# vLLM：7 策略 × mixed 工作负载 × 3 速率 × 3 runs
+# vLLM：5 策略 × mixed 工作负载 × 3 速率 × 3 runs
 HF_HUB_OFFLINE=1 python -m bidkv.experiments.vllm.runner \
-    --strategies "preempt-evict,preempt-evict-sjf,static-random,largest-first,uniform,slack-aware,bidkv" \
+    --strategies "preempt-evict,preempt-evict-sjf,static-random,largest-first,bidkv" \
     --workloads mixed \
     --mixed-rates 2.0,3.8,5.7 \
     --runs 3 \

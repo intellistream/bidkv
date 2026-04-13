@@ -1,4 +1,4 @@
-"""vLLM 7-baseline experiment runner — 论文 §6 的主实验编排脚本。
+"""vLLM 5-strategy experiment runner — 论文 §6 的主实验编排脚本。
 
 Usage
 -----

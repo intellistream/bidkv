@@ -38,8 +38,6 @@ BidKV **does not compress tokens** — it only controls *who gets preempted*. Th
 | `preempt-evict-sjf` | `PreemptEvictSJFStrategy` | SJF admission + LIFO eviction |
 | `static-random` | `StaticRandomStrategy` | Random victim selection |
 | `largest-first` | `LargestFirstStrategy` | Capacity-greedy: evict largest KV occupant first |
-| `uniform` | `UniformStrategy` | Proportional eviction across all requests |
-| `slack-aware` | `SlackAwareStrategy` | SLO-deadline aware victim selection |
 | `bidkv` | `BidKVStrategy` | Quality-aware: maximise U = r / (δ + ε) |
 
 ## Configuration
@@ -66,8 +64,7 @@ from bidkv import (
     BaselineRegistry,
     BidKVStrategy,
     PreemptEvictStrategy, LargestFirstStrategy,
-    SlackAwareStrategy, StaticRandomStrategy,
-    UniformStrategy, PreemptEvictSJFStrategy,
+    StaticRandomStrategy, PreemptEvictSJFStrategy,
 )
 
 # Register all built-in strategies at once
@@ -87,9 +84,9 @@ print(registry2.list_strategies())  # ["bidkv", "preempt-evict"]
 ## Running Experiments
 
 ```bash
-# vLLM: 7 strategies × mixed workload × 3 rates × 3 runs
+# vLLM: 5 strategies × mixed workload × 3 rates × 3 runs
 HF_HUB_OFFLINE=1 python -m bidkv.experiments.vllm.runner \
-    --strategies "preempt-evict,preempt-evict-sjf,static-random,largest-first,uniform,slack-aware,bidkv" \
+    --strategies "preempt-evict,preempt-evict-sjf,static-random,largest-first,bidkv" \
     --workloads mixed \
     --mixed-rates 2.0,3.8,5.7 \
     --runs 3 \
