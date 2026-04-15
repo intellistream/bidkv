@@ -850,7 +850,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[ExperimentConfig, bool]:
     tuple[ExperimentConfig, bool]
         (config, resume) — 实验配置 + 是否断点续跑。
     """
-    parser = argparse.ArgumentParser(description="BidKV vLLM 7-Baseline Experiment Runner")
+    parser = argparse.ArgumentParser(description="BidKV vLLM 5-Strategy Experiment Runner")
     parser.add_argument(
         "--strategies",
         type=str,

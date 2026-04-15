@@ -157,8 +157,7 @@ across two arrival-rate regimes and two workload types.
   \item Python~3.10 or 3.11
   \item conda (Miniconda/Anaconda) for environment management
   \item vLLM~0.17.1 (\url{https://github.com/vllm-project/vllm})
-  \item SGLang (version matching \texttt{requirements.txt};\\
-    \url{https://github.com/sgl-project/sglang})
+  \item SGLang~0.5.9 (\url{https://github.com/sgl-project/sglang})
   \item BidKV package (this artifact; zero external dependencies beyond
     vLLM/SGLang, which are runtime-only imports in the adapter layer)
 \end{itemize}
@@ -221,8 +220,10 @@ All components are pure Python.
   \item $T_2$ \textbf{vLLM experiment execution.}
     \texttt{runner.py} iterates over 5 strategies $\times$ 2 workloads
     $\times$ 3 arrival rates $\times$ 3 runs.
-    For each strategy it starts a vLLM server (with BidKV adapter injected
-    via plugin for non-PE strategies), replays the frozen trace using a
+    For each strategy it starts a vLLM server (BidKV scheduler hooks are
+    injected via the \texttt{vllm.general\_plugins} entry point for all
+    strategies; preempt-evict installs a no-op FCFS hook identical to
+    vanilla vLLM for measurement fairness), replays the frozen trace using a
     Poisson open-loop arrival model, collects per-request TTFT and
     completion-token counts, and writes one JSON result file per run.
     Fixed server parameters: \texttt{--gpu-memory-utilization~0.5},
