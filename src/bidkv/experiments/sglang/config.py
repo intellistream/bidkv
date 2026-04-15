@@ -13,28 +13,40 @@ from bidkv.experiments.common.model import get_default_model
 
 # ── 策略（v2.3 冻结版本，3 策略核心）────────────────────────────────
 STRATEGY_SGLANG_DEFAULT = "sglang_default"  # SGLang native (= Preempt-Evict)
-STRATEGY_SLACK_AWARE = "slack_aware"  # 强无-bid 系统对手
+STRATEGY_RANDOM_EVICT = "static-random"  # Random victim selection (Random-Evict in paper)
 STRATEGY_BIDKV = "bidkv"  # BidKV 完整 bid pipeline
 
 # 扩展策略（验证性实验使用，非 v2.3 冻结 54-run 计划范围）
+STRATEGY_SLACK_AWARE = "slack_aware"      # 消融验证使用
 STRATEGY_PREEMPT_EVICT_SJF = "preempt-evict-sjf"  # SJF admission + LIFO eviction 消融
 
 # v2.3 冻结正式策略（54-run 计划使用）
+# 与论文 Table 4 一致：Vanilla SGLang / Random-Evict / BidKV
 FROZEN_STRATEGIES: tuple[str, ...] = (
     STRATEGY_SGLANG_DEFAULT,
-    STRATEGY_SLACK_AWARE,
+    STRATEGY_RANDOM_EVICT,
     STRATEGY_BIDKV,
 )
 
-# 向后兼容别名 = 冻结策略（默认实验配置不变）
+# ALL_STRATEGIES = 冻结的正式评估策略（与论文 Table 4 一致：Vanilla SGLang / Random-Evict / BidKV）
 ALL_STRATEGIES: tuple[str, ...] = FROZEN_STRATEGIES
+
+# EXTENDED_STRATEGIES = 所有可运行策略（用于 __post_init__ 校验，含扩展/消融策略）
+EXTENDED_STRATEGIES: tuple[str, ...] = (
+    STRATEGY_SGLANG_DEFAULT,
+    STRATEGY_RANDOM_EVICT,
+    STRATEGY_BIDKV,
+    STRATEGY_SLACK_AWARE,
+    STRATEGY_PREEMPT_EVICT_SJF,
+)
 
 # SGLang 策略名 → BaselineRegistry 内部名映射
 # 未在此映射中的策略名直接用作 registry key（fallback = identity）
 STRATEGY_BASELINE_MAP: dict[str, str] = {
     STRATEGY_SGLANG_DEFAULT: "preempt-evict",
-    STRATEGY_SLACK_AWARE: "slack-aware",
+    STRATEGY_RANDOM_EVICT: "static-random",
     STRATEGY_BIDKV: "bidkv",
+    STRATEGY_SLACK_AWARE: "slack-aware",
     STRATEGY_PREEMPT_EVICT_SJF: "preempt-evict-sjf",
 }
 
@@ -176,9 +188,9 @@ class SGLangExperimentConfig:
         return f"sglang__{strategy}__{workload}__rate{rate}__run{run_index}"
 
     def __post_init__(self) -> None:
-        unknown = set(self.strategies) - set(ALL_STRATEGIES)
+        unknown = set(self.strategies) - set(EXTENDED_STRATEGIES)
         if unknown:
             raise ValueError(
                 f"Unknown strategies: {unknown}. "
-                f"Valid strategies: {ALL_STRATEGIES}"
+                f"Valid strategies: {EXTENDED_STRATEGIES}"
             )

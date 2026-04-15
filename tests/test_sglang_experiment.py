@@ -21,6 +21,7 @@ from bidkv.experiments.sglang.config import (
     ALL_STRATEGIES,
     ALL_WORKLOADS,
     DEFAULT_REQUEST_RATES,
+    EXTENDED_STRATEGIES,
     STRATEGY_BIDKV,
     STRATEGY_SGLANG_DEFAULT,
     STRATEGY_SLACK_AWARE,
@@ -123,7 +124,9 @@ class TestStrategyConstants:
     def test_all_strategies_tuple(self) -> None:
         assert STRATEGY_SGLANG_DEFAULT in ALL_STRATEGIES
         assert STRATEGY_BIDKV in ALL_STRATEGIES
-        assert STRATEGY_SLACK_AWARE in ALL_STRATEGIES
+        # slack_aware is an extended/ablation strategy, not in the frozen 3-strategy eval set
+        assert STRATEGY_SLACK_AWARE not in ALL_STRATEGIES
+        assert STRATEGY_SLACK_AWARE in EXTENDED_STRATEGIES
 
     def test_strategy_count(self) -> None:
         assert len(ALL_STRATEGIES) == 3
