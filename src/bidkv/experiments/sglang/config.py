@@ -41,12 +41,10 @@ EXTENDED_STRATEGIES: tuple[str, ...] = (
 )
 
 # SGLang 策略名 → BaselineRegistry 内部名映射
-# 未在此映射中的策略名直接用作 registry key（fallback = identity）
 STRATEGY_BASELINE_MAP: dict[str, str] = {
     STRATEGY_SGLANG_DEFAULT: "preempt-evict",
     STRATEGY_RANDOM_EVICT: "static-random",
     STRATEGY_BIDKV: "bidkv",
-    STRATEGY_SLACK_AWARE: "slack-aware",
     STRATEGY_PREEMPT_EVICT_SJF: "preempt-evict-sjf",
 }
 
