@@ -18,6 +18,15 @@ All notable changes to this project will be documented in this file.
   - 更新 AD：`paper-ad/bidkv_ad.tex` 从 "seven implementations (five evaluated)" 简化为 "five implementations"
   - 测试结果：362 tests pass
 
+- **AD (Artifact Description) 修订** (2026-04-10):
+  - 修复 T2/T4 Verbatim 块中双反斜杠 `\\` → 单反斜杠 `\`（shell 行继续符渲染错误）
+  - T2 命令新增 `--max-model-len 8192`（与论文固定参数一致）
+  - T3 命令新增 `--attention-backend triton`（与实验实际使用一致），并添加 triton vs flashinfer 兼容性说明
+  - 补全 HuggingFace ShareGPT URL：`anon8231489123/` → `anon8231489123/ShareGPT_Vicuna_unfiltered`
+  - SGLang 执行时间更正：`≈2--3 h` → `≈3--4 h`（9 runs × ~24 min = ~3.6 h）
+  - `\artexp` 新增 Table V（超参数敏感性）预期结果：SLO/TTFT P95 在全参数扫描范围内稳定（±2 pp / ±10%）
+  - `\artout` 修正：CSV → JSON，Tables II--III → Tables II--IV，Figures 4--5 → Figure 4 only，补充 Figures 1--3/5 为静态资产说明
+
 
   - **文件删除**：`baselines/random_evict.py`（RandomEvictStrategy，未注册、非 v2.3 冻结策略）、
     `compression/`（整个目录，Mode B CompressionExecutor Protocol）、
