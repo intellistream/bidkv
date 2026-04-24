@@ -268,7 +268,7 @@ rm -rf /root/.cache/flashinfer
 cd /path/to/bidkv && pip install -e ".[dev]"
 
 # 5. (Optional) Verify frozen traces
-#    Traces are pre-committed; skip if no HF access.
+#    Pre-committed; skip if no HF access.
 FREEZE=bidkv.experiments.vllm.freeze_traces
 python -m $FREEZE \
     --mode formal --use-frozen-rates \
