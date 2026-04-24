@@ -174,6 +174,9 @@ across two arrival-rate regimes and two workload types.
     \textit{First-time SGLang execution requires an additional
     $\approx$30--60\,min for flashinfer JIT kernel compilation;
     subsequent runs use the \texttt{/root/.cache/flashinfer/} cache.}
+    Hyperparameter sensitivity sweep ($T_5$, 10 variants $\times$ 3 runs):
+    $\approx$4--5\,h (independent of $T_2$/$T_3$; can be run on the same GPU
+    before or after $T_2$/$T_3$ on a single-GPU machine).
   \item \textbf{Artifact Analysis:} 5--10\,min
     (single analysis script invocation per result directory).
 \end{itemize}
@@ -245,7 +248,7 @@ conda activate bidkv
 # 2. Install vLLM and SGLang
 pip install vllm==0.17.1
 # SGLang 0.5.9 with flashinfer 0.6.3:
-pip install "sglang[all]"
+pip install "sglang[all]==0.5.9"
 
 # 3. SGLang requires CUDA 12+ nvcc.
 #    apt nvidia-cuda-toolkit: nvcc 11.5 (old).
@@ -371,8 +374,9 @@ python -m bidkv.experiments.sglang.analysis \
 
   \item $T_5$ \textbf{Hyperparameter sensitivity (Table~V).}
     Run 10 parameter variants ($\times$ 3 runs each,
-    $\approx$3\,h on a single GPU):
+    $\approx$4--5\,h on a single GPU):
     \begin{Verbatim}
+mkdir -p results/vllm_sensitivity_v2
 nohup bash scripts/run_sensitivity_v2.sh \
     > results/vllm_sensitivity_v2/run.log \
     2>&1 &
