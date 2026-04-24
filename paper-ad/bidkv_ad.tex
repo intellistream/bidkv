@@ -163,7 +163,7 @@ across two arrival-rate regimes and two workload types.
 \begin{itemize}
   \item \textbf{Artifact Setup:} 20--30\,min
     (conda environment creation, package installation, model download if not
-    cached, trace generation).
+    cached; SHA-256 trace verification is optional, see $T_1$).
   \item \textbf{Artifact Execution:}
     vLLM full matrix (5 strategies $\times$ 2 workloads $\times$ 3 rates
     $\times$ 3 runs = 90 experiment runs): $\approx$ 20--28\,h
@@ -264,6 +264,7 @@ apt-get install -y cuda-nvcc-12-8
 rm -rf /root/.cache/flashinfer
 
 # 4. Install BidKV (editable)
+# replace /path/to/bidkv with your clone path:
 cd /path/to/bidkv && pip install -e ".[dev]"
 
 # 5. Generate frozen traces (shared by all)
@@ -344,7 +345,8 @@ python -m bidkv.experiments.vllm.runner \
     Strategy name mapping: code name \texttt{sglang\_default} corresponds
     to paper name ``vanilla SGLang''; \texttt{static-random} corresponds
     to ``Random-Evict''.
-    Fixed server parameters: \texttt{--mem-fraction-static~0.85},
+    Fixed server parameters: \texttt{--mem-fraction-static~0.85}
+    (the \texttt{SGLangServerConfig} default; not required on the command line),
     \texttt{--max-total-tokens~9600}, \texttt{--attention-backend~triton}
     (triton backend is required to avoid a \texttt{flashinfer}/\texttt{sgl\_kernel}
     incompatibility with PyTorch~2.6; flashinfer is still installed for
