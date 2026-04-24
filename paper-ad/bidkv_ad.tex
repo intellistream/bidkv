@@ -170,7 +170,9 @@ across two arrival-rate regimes and two workload types.
     (mixed-workload runs average 5--8\,min each; long-context runs average
     20--25\,min each; server startup adds $\approx$4\,min per run).
     SGLang portability slice (3 strategies $\times$ rate~3.8\,req/s $\times$ 3~runs = 9~runs): $\approx$3--4\,h
-    (each run averages 20--25\,min; server startup adds $\approx$4\,min per run).
+    (each run averages 20--25\,min; server startup adds $\approx$4\,min per run;
+    SGLang's Python-level per-step dispatch is slower than vLLM's
+    C++ scheduler path, accounting for the longer per-run duration).
     \textit{First-time SGLang execution requires an additional
     $\approx$30--60\,min for flashinfer JIT kernel compilation;
     subsequent runs use the \texttt{/root/.cache/flashinfer/} cache.}
@@ -179,6 +181,10 @@ across two arrival-rate regimes and two workload types.
     before or after $T_2$/$T_3$ on a single-GPU machine).
   \item \textbf{Artifact Analysis:} 5--10\,min
     (single analysis script invocation per result directory).
+  \item \textbf{Total (sequential, single GPU, all tasks):}
+    $\approx$28--38\,h
+    ($T_2$: 20--28\,h; $T_3$: 3--4\,h; $T_5$: 4--5\,h;
+    setup and analysis: $<$1\,h).
 \end{itemize}
 
 \artin
@@ -288,10 +294,13 @@ export NO_PROXY="127.0.0.1,localhost"
 \textbf{Workflow tasks and dependencies:}
 
 \begin{itemize}
-  \item $T_1$ \textbf{Trace generation.}
+  \item $T_1$ \textbf{Trace generation (optional verification).}
     \texttt{freeze\_traces.py} samples 1\,000 requests (mixed) and 500
     requests (long-context) from ShareGPT with seed~42 and writes
     SHA-256-verified JSON trace files to \texttt{experiments/vllm/traces/}.
+    The frozen traces are pre-committed to the repository;
+    $T_1$ verifies SHA-256 reproducibility but is not required
+    to execute $T_2$--$T_5$.
 
   \item $T_2$ \textbf{vLLM experiment execution.}
     \texttt{runner.py} iterates over 5 strategies $\times$ 2 workloads
@@ -394,6 +403,9 @@ $T_2$ and $T_3$ are independent; on a single-GPU machine they must be
 run sequentially ($T_2$ first, then $T_3$).
 Parallel execution requires two GPUs.
 $T_5$ is independent of $T_1$--$T_4$.
+Set \texttt{HF\_HUB\_OFFLINE=1} before running $T_2$/$T_3$/$T_5$;
+if running $T_1$ to verify trace reproducibility, ensure the
+ShareGPT dataset is locally cached before setting this variable.
 
 \textbf{Experimental parameters:}
 \begin{itemize}
@@ -428,11 +440,13 @@ reclamation figure (Figure~3). Table~V (hyperparameter sensitivity)
 is produced by $T_5$ (\texttt{scripts/run\_sensitivity\_v2.sh} +
 \texttt{scripts/analyze\_sensitivity\_v2.py}), not by
 \texttt{experiments/vllm/analysis.py}.
-Figures~1--2, Algorithm~1, and Figure~4 are pre-generated static
-assets in \texttt{paper/figures/} and are not produced by the
-analysis scripts.
+Figures~1--2, Algorithm~1, and Figure~4 are static assets
+included in the submitted paper; evaluators should refer to the
+paper directly for these elements.
 The scripts handle the legacy field-name difference between older
 result batches (\texttt{total\_compressions}) and newer ones
-(\texttt{total\_evictions}).
+(\texttt{total\_evictions});
+evaluators running fresh experiments will see only
+\texttt{total\_evictions}.
 
 \end{document}
