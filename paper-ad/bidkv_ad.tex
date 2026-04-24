@@ -370,18 +370,16 @@ python -m bidkv.experiments.sglang.analysis \
     \end{Verbatim}
 
   \item $T_5$ \textbf{Hyperparameter sensitivity (Table~V).}
-    Pre-computed sensitivity runs (10 parameter variants
-    $\times$ 3 runs each) are included in
-    \texttt{results/vllm\_sensitivity\_v2/}.
-    Verify the robustness conclusions with:
-    \begin{Verbatim}
-python scripts/analyze_sensitivity_v2.py
-    \end{Verbatim}
-    To re-run from scratch ($\approx$3\,h on a single GPU):
+    Run 10 parameter variants ($\times$ 3 runs each,
+    $\approx$3\,h on a single GPU):
     \begin{Verbatim}
 nohup bash scripts/run_sensitivity_v2.sh \
     > results/vllm_sensitivity_v2/run.log \
     2>&1 &
+    \end{Verbatim}
+    Then verify the robustness conclusions:
+    \begin{Verbatim}
+python scripts/analyze_sensitivity_v2.py
     \end{Verbatim}
 
 \end{itemize}
@@ -391,8 +389,7 @@ $T_1 \rightarrow T_3 \rightarrow T_4$.
 $T_2$ and $T_3$ are independent; on a single-GPU machine they must be
 run sequentially ($T_2$ first, then $T_3$).
 Parallel execution requires two GPUs.
-$T_5$ is independent of $T_1$--$T_4$; its pre-computed data requires
-no additional trace generation or server execution.
+$T_5$ is independent of $T_1$--$T_4$.
 
 \textbf{Experimental parameters:}
 \begin{itemize}
@@ -424,9 +421,9 @@ TTFT, TPOT P95, throughput, and SLO attainment from raw
 per-request data (P95 and SLO are not pre-computed in the JSON).
 Outputs are JSON metric files (supporting Tables~II--IV) and a PDF
 reclamation figure (Figure~3). Table~V (hyperparameter sensitivity)
-data is pre-computed in \texttt{results/vllm\_sensitivity\_v2/} and
-verified by \texttt{scripts/analyze\_sensitivity\_v2.py}; it is not
-produced by \texttt{experiments/vllm/analysis.py}.
+is produced by $T_5$ (\texttt{scripts/run\_sensitivity\_v2.sh} +
+\texttt{scripts/analyze\_sensitivity\_v2.py}), not by
+\texttt{experiments/vllm/analysis.py}.
 Figures~1--2, Algorithm~1, and Figure~4 are pre-generated static
 assets in \texttt{paper/figures/} and are not produced by the
 analysis scripts.
