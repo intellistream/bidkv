@@ -1,0 +1,85 @@
+"""bidkv — Framework-portable KV cache 请求调度原语。
+
+零外部依赖的独立 Python 包，提供：
+- Protocol 层：核心类型（CompressionBid, BidPool, BidAcceptance）
+- Scoring 层：PositionalScoring token 重要度评分
+- Core 层：BidPoolManager, GreedyBidSolver, PressureDetector
+- Baselines 层：5 个评估策略
+"""
+
+from bidkv._version import __version__
+from bidkv.adapters import BaseAdapterMetrics, FrameworkAdapter
+from bidkv.baselines import (
+    BaselineContext,
+    BaselineRegistry,
+    BaselineStrategy,
+    BidKVStrategy,
+    CompressionAction,
+    LargestFirstStrategy,
+    PreemptEvictSJFStrategy,
+    PreemptEvictStrategy,
+    RequestState,
+    StaticRandomStrategy,
+)
+from bidkv.config import BidKVConfig
+from bidkv.experiments import ExperimentMetrics
+from bidkv.pool import BidPoolManager
+from bidkv.pressure import PressureConfig, PressureDetector
+from bidkv.protocol import (
+    FEATURE_GATE_ID,
+    BidAcceptance,
+    BidCapacityError,
+    BidExecutionError,
+    BidExpiredError,
+    BidPool,
+    CompressionBid,
+    CompressionBidError,
+    CompressionBidProvider,
+    compute_utility,
+    make_bid_id,
+)
+from bidkv.scoring import PositionalScoring, ScoringStrategy, build_bids
+from bidkv.solver import GreedyBidSolver, SolverConfig
+
+__all__ = [
+    "__version__",
+    "FEATURE_GATE_ID",
+    # Protocol
+    "BidAcceptance",
+    "BidCapacityError",
+    "BidExecutionError",
+    "BidExpiredError",
+    "BidKVConfig",
+    "BidPool",
+    "CompressionBid",
+    "CompressionBidError",
+    "CompressionBidProvider",
+    "compute_utility",
+    "make_bid_id",
+    # Core
+    "BidPoolManager",
+    "GreedyBidSolver",
+    "PressureConfig",
+    "PressureDetector",
+    "SolverConfig",
+    # Scoring
+    "PositionalScoring",
+    "ScoringStrategy",
+    "build_bids",
+    # Baselines
+    "BaselineContext",
+    "BaselineRegistry",
+    "BaselineStrategy",
+    "BidKVStrategy",
+    "CompressionAction",
+    "LargestFirstStrategy",
+    "PreemptEvictStrategy",
+    "PreemptEvictSJFStrategy",
+    "RequestState",
+    "StaticRandomStrategy",
+    # Adapters
+    "BaseAdapterMetrics",
+    "FrameworkAdapter",
+    # Experiments
+    "ExperimentMetrics",
+]

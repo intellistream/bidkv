@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bidkv"
+dynamic = ["version"]
+description = "BidKV — CompressionBid protocol layer for KV cache scheduling primitives"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# 零外部依赖 — 仅依赖 Python stdlib
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "bidkv._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ARG"]
+
+[tool.ruff.lint.per-file-ignores]
+# **context is part of ScoringStrategy Protocol — must keep for interface compatibility
+"src/bidkv/scoring/uniform.py" = ["ARG002"]
+"src/bidkv/scoring/random_score.py" = ["ARG002"]
+# request_id kept in metrics API for future per-request tracking
+"src/bidkv/adapters/vllm/adapter.py" = ["ARG002"]
+"src/bidkv/adapters/sglang/adapter.py" = ["ARG002"]
+# SGLang hook params needed for real SGLang integration, unused in stub implementations
+"src/bidkv/adapters/sglang/radix_hook.py" = ["ARG001"]
+"src/bidkv/adapters/sglang/h2o_hook.py" = ["ARG001"]
+# Test FakeScheduler params mirror real vLLM Scheduler interface
+"tests/test_vllm_adapter.py" = ["ARG002"]
+# **kwargs is part of BaselineStrategy ABC interface — must keep for subclass compatibility
+"src/bidkv/baselines/preempt_evict.py" = ["ARG002"]
+"src/bidkv/baselines/static_random.py" = ["ARG002"]
+"src/bidkv/baselines/uniform.py" = ["ARG002"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.entry-points."vllm.general_plugins"]
+bidkv = "bidkv.adapters.vllm.plugin:register"

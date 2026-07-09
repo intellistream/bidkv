@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+.pytest_cache/
+htmlcov/
+.coverage
+.ruff_cache/
+
+# Local environment and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
