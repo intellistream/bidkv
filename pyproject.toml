@@ -59,9 +59,14 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "ARG"]
 "src/bidkv/baselines/preempt_evict.py" = ["ARG002"]
 "src/bidkv/baselines/static_random.py" = ["ARG002"]
 "src/bidkv/baselines/uniform.py" = ["ARG002"]
+# vllm_hust adapter — some methods accept a untyped vllm_config for protocol compatibility
+"src/bidkv/adapters/vllm_hust/selector.py" = ["ARG001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [project.entry-points."vllm.general_plugins"]
 bidkv = "bidkv.adapters.vllm.plugin:register"
+
+[project.entry-points."vllm.victim_selector"]
+bidkv = "bidkv.adapters.vllm_hust.selector:BidkvVictimSelector"
